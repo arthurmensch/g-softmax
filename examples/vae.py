@@ -18,9 +18,9 @@ from torchvision.utils import save_image
 from gsoftmax.models import VAE, ConvVAE, LastLayer, WrappedVAE
 from gsoftmax.modules import safe_log, Gspace2d
 
-base_dir = expanduser('~/output/ot-entropies')
-exp = Experiment('VAE')
-exp.observers.append(FileStorageObserver.create(join(base_dir, 'runs')))
+base_dir = expanduser('~/output/g-softmax/vae')
+exp = Experiment('vae')
+exp.observers.append(FileStorageObserver.create(base_dir))
 
 
 class ToProb(object):
@@ -45,7 +45,6 @@ class ToProb(object):
 def system():
     cuda = True
     device = 0
-    output_dir = join(base_dir, 'runs')
     seed = 0
     source = 'mnist'
     checkpoint = False
@@ -60,10 +59,9 @@ def base():
     loss_type = 'geometric'
     latent_dim = 256
     model_type = 'flat'
-    max_iter = 30
-    sigma = 1.
+    max_iter = 20
+    sigma = 2.
     regularization = 1
-    model_type = 'conv'
     lr = 1e-3
 
 
@@ -124,13 +122,14 @@ def _test(model, loader, device, epoch, output_dir, gspace, _run):
                 comparison /= comparison.view(n_batch, n_channel, -1).max(dim=2)[0][:, :, None, None]
                 filename = join(output_dir, 'reconstruction_' + str(epoch) + '.png')
                 save_image(comparison.cpu(), filename, nrow=n)
-                _run.add_artifact(filename)
+                # _run.add_artifact(filename)
 
             data = data.view(batch_size, -1)
             pred = pred.view(batch_size, -1)
             kl_div += F.kl_div(safe_log(pred), target=data, reduction='sum').item()
 
-            bregman_div += gspace.hausdorff(pred, data, reduction='sum').item()
+            if gspace is not None:
+                bregman_div += gspace.hausdorff(pred, data, reduction='sum').item()
 
             bce += F.binary_cross_entropy(pred, target=data,
                                           reduction='sum').item()
@@ -159,7 +158,7 @@ def generate(model, latent_dim, device, output_dir, epoch, _run):
             pred.shape[0], pred.shape[1], -1).max(dim=2)[0][:, :, None, None]
         filename = join(output_dir, 'sample_' + str(epoch) + '.png', )
         save_image(pred, filename)
-        _run.add_artifact(filename)
+        # _run.add_artifact(filename)
 
 
 @exp.capture
@@ -169,30 +168,32 @@ def save_checkpoint(model, optimizer, output_dir, epoch, _run):
                   'epoch': epoch}
     filename = join(output_dir, f'checkpoint_{epoch}.pkl')
     torch.save(state_dict, filename)
-    _run.add_artifact(filename)
+    # _run.add_artifact(filename)
 
 
 @exp.automain
-def run(device, loss_type, source, cuda, batch_size, checkpoint, output_dir,
+def run(device, loss_type, source, cuda, batch_size, checkpoint,
         epochs, latent_dim, model_type, max_iter, sigma,
         lr,
-        _seed):
+        _seed, _run):
     torch.manual_seed(_seed)
     device = torch.device(f"cuda:{device}" if cuda else "cpu")
 
     if loss_type == 'bce':
         transform = transforms.ToTensor()
-    elif loss_type == ['kl', 'metric']:
+    elif loss_type in ['kl', 'geometric']:
         transform = transforms.Compose([transforms.ToTensor(), ToProb()])
     else:
-        raise ValueError('Wrong `loss_type` argument')
+        raise ValueError(f'Wrong `loss_type` argument, got {loss_type}')
 
     kwargs = {'num_workers': 1, 'pin_memory': True} if cuda else {}
 
     if source == 'mnist':
-        train_data = datasets.MNIST('../data', train=True, download=True,
+        train_data = datasets.MNIST(expanduser('~/data'), train=True,
+                                    download=True,
                                     transform=transform)
-        test_data = datasets.MNIST('../data', train=False, transform=transform)
+        test_data = datasets.MNIST(expanduser('~/data'), train=False,
+                                   transform=transform)
         h, w = 28, 28
     elif 'quickdraw' in source:
         _, class_name, size = source.split('_')
@@ -221,7 +222,8 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint, output_dir,
     else:
         vae = VAE(h, w, latent_dim).to(device)
 
-    gspace = Gspace2d(h, w, sigma=sigma, tol=1e-4, max_iter=max_iter, verbose=True)
+    gspace = Gspace2d(h, w, sigma=sigma, tol=1e-4, max_iter=max_iter,
+                      verbose=True)
     last_layer = LastLayer(loss_type=loss_type, gspace=gspace)
 
     model = WrappedVAE(vae, last_layer)
@@ -238,7 +240,7 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint, output_dir,
     else:
         start_epoch = 0
 
-    output_dir = join(output_dir, str(exp._id), 'artifacts')
+    output_dir = join(base_dir, str(_run._id), 'artifacts')
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 

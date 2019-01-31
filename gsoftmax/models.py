@@ -112,20 +112,20 @@ class LastLayer(nn.Module):
         if self.loss_type == 'geometric':
             self.gspace = gspace
 
-    def forward(self, logits):
+    def pred(self, logits):
         n_batch, n_channel, h, w = logits.shape
         logits = logits.view(n_batch, -1)
         if self.loss_type == 'bce':
-            rec = F.sigmoid(logits, dim=1)
+            rec = torch.sigmoid(logits)
         elif self.loss_type == 'kl':
             rec = F.softmax(logits, dim=1)
         elif self.loss_type == 'geometric':
-            rec = self.gspace.softmax(logits, dim=1)
+            rec = self.gspace.softmax(logits)
         else:
             raise ValueError
         return rec.view(n_batch, n_channel, h, w)
 
-    def loss(self, logits, target):
+    def forward(self, logits, target):
         n_batch, n_channel, h, w = logits.shape
 
         target = target.view(-1, h * w)
@@ -161,8 +161,8 @@ class WrappedVAE(nn.Module):
         return loss + penalty * self.regularization, penalty
 
     def decode(self, z):
-        return self.last_layer(self.model.decode(z))
+        return self.last_layer.pred(self.model.decode(z))
 
     def pred(self, x):
         logits, _, _ = self.model(x)
-        return self.last_layer(logits)
+        return self.last_layer.pred(logits)

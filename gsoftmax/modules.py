@@ -90,7 +90,7 @@ class _BaseGspace(torch.nn.Module):
         with torch.enable_grad():
             f = Parameter(f)
             lse = self.lse(f, init)
-        softmax, = torch.autograd.grad(lse.sum(), (f,))
+            softmax, = torch.autograd.grad(lse.sum(), (f,))
         return lse, softmax
 
     def softmax(self, f, init=None):
@@ -100,18 +100,17 @@ class _BaseGspace(torch.nn.Module):
         with torch.enable_grad():
             alpha = Parameter(alpha)
             entropy = self.entropy(alpha)
-        potentials, = torch.autograd.grad(entropy.sum(), (alpha,))
+            potentials, = torch.autograd.grad(entropy.sum(), (alpha,))
         return entropy, potentials
 
     def potential(self, alpha):
         return self.entropy_and_potential(alpha)[1]
 
     def hausdorff(self, input, target, reduction='mean'):
-        batch_size, h, w = input.shape
         true_entropy = self.entropy(input)
         pred_entropy, potential = self.entropy_and_potential(target)
         bregman = true_entropy - pred_entropy - torch.sum(
-            (potential * (input - target)).view(batch_size, -1), dim=1)
+            potential * (input - target), dim=1)
         if reduction == 'mean':
             return bregman.mean()
         elif reduction == 'sum':
