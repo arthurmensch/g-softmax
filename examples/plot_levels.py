@@ -7,7 +7,7 @@ from matplotlib import rc
 from matplotlib.colors import ListedColormap
 from torch.nn import Parameter
 
-from gsoftmax.entropies import SelfTransportConj, SelfTransport
+from gsoftmax.modules import Gspace1d, Gspace2d
 
 rc('font', **{'family': 'sans-serif'})
 rc('text', usetex=True)
@@ -37,23 +37,21 @@ fig, axes = plt.subplots(1, 5, figsize=(7, 1.5),
                                       'wspace': 0.02})
 cmap = ListedColormap(sns.diverging_palette(255, 133,
                                             l=60, n=50, center="dark"))
+
 for j, c in enumerate([1, 10]):
     j = j + 2
-    C = np.array([[0., c], [c, 0.]])
+    C = torch.tensor([[0., c], [c, 0.]])
 
-    C = torch.tensor(C).double()
+    gspace = Gspace1d(C, verbose=True)
 
     xs = np.log(np.linspace(1e-3, 2, resx))  # exp(f)
     ys = np.log(np.linspace(1e-3, 2, resy))  # exp(g)
 
-    f = Parameter(torch.tensor([[x, y] for x in xs for y in ys]).double())
-    distance = SelfTransportConj.apply(C, f, 2, 1000, 1e-15, 'sinkhorn')
-    alpha, = torch.autograd.grad(distance.sum(), (f,))
+    f = Parameter(torch.tensor([[x, y] for x in xs for y in ys]))
+    distance, alpha = gspace.lse_and_softmax(f)
 
     alpha = Parameter(alpha.detach().clone())
-    v = SelfTransport.apply(C, alpha, 2, 1000, 1e-12, 'sinkhorn')
-
-    f_proj, = torch.autograd.grad(v.sum(), (alpha,))
+    v, f_proj = gspace.entropy_and_potential(alpha)
 
     f_proj += distance[:, None]
 
@@ -136,18 +134,20 @@ cbar.set_ticks([-1, 0, 1, 2, 3])
 cbar.ax.tick_params(labelsize=5)
 axes[4].annotate(r'$\Omega^\star(f)$', (-1.2, -.3), xycoords='axes fraction')
 
-for i, c in enumerate([1, 2]):
-    C = np.array([[0., c], [c, 0.]])
-    C = torch.tensor(C).double()
-    f = Parameter(torch.tensor([[x, 0] for x in xs]).double())
-    distance = SelfTransportConj.apply(C, f, 2, 1000, 1e-15, 'sinkhorn')
-    alpha, = torch.autograd.grad(distance.sum(), (f,))
+for i, c in enumerate([.1, 2]):
+    C = torch.tensor([[0., c], [c, 0.]])
+    gspace = Gspace1d(C, verbose=True)
+
+    f = Parameter(torch.tensor([[x, 0] for x in xs]))
+    distance, alpha = gspace.lse_and_softmax(f)
+
     alpha = alpha.numpy()
     axes[0].plot(xs, alpha[:, 0], color=f'C{i + 1}')
 
-    alpha_0 = torch.linspace(0, 1, 50).double()
+    alpha_0 = torch.linspace(0, 1, 50)
     alpha = torch.cat([alpha_0[:, None], 1 - alpha_0[:, None]], dim=1)
-    v = SelfTransport.apply(C, alpha, 2, 1000, 1e-12, 'sinkhorn').numpy()
+    v = gspace.entropy(alpha)
+    v = v.numpy()
     axes[1].plot(alpha_0.numpy(), -v, color=f'C{i + 1}', label=f'$c = {c}$')
 
 axes[0].set_xlabel(r'$f_1 - f_2$')

@@ -28,6 +28,20 @@ class LSEFunc(torch.autograd.Function):
         return grad * grad_output[:, None], None, None
 
 
+class EntropyFunc(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, alpha, gspace):
+        with torch.no_grad():
+            value, grad = gspace._entropy(alpha)
+        ctx.save_for_backward(grad)
+        return value
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad, = ctx.saved_tensors
+        return grad * grad_output[:, None], None
+
+
 class _BaseGspace(torch.nn.Module):
     def __init__(self, tol=1e-9,
                  max_iter=1000,
@@ -41,7 +55,7 @@ class _BaseGspace(torch.nn.Module):
 
         self.method = method
 
-    def entropy(self, alpha: torch.tensor):
+    def _entropy(self, alpha: torch.tensor):
         with torch.no_grad():
             f = torch.zeros_like(alpha)
             log_alpha = safe_log(alpha)
@@ -56,10 +70,7 @@ class _BaseGspace(torch.nn.Module):
                     break
                 f = .5 * (f + g)
             f = -f
-        return (f * alpha).sum(dim=1)
-
-    def lse(self, f, init):
-        return LSEFunc.apply(f, init, self)
+        return (f * alpha).sum(dim=1), f
 
     def _lse(self, f: torch.tensor, init=None):
         if self.method == 'lbfgs':
@@ -68,6 +79,12 @@ class _BaseGspace(torch.nn.Module):
             return self._lse_fw(f, init)
         else:
             raise ValueError('Wrong method')
+
+    def entropy(self, alpha: torch.tensor):
+        return EntropyFunc.apply(alpha, self)
+
+    def lse(self, f, init=None):
+        return LSEFunc.apply(f, init, self)
 
     def lse_and_softmax(self, f, init=None):
         with torch.enable_grad():
@@ -163,7 +180,7 @@ class _BaseGspace(torch.nn.Module):
 
                 optimizer.step(closure)
             l = l.detach()
-            v = - self._log_quadratic(l, f)
+            v = - self._log_quadratic(l, fd)
             if self.verbose:
                 print(f'Initial quadratic value: {v_init:.3f},'
                       f' maximized value: {v.mean().item():.3f}')
@@ -211,7 +228,7 @@ class _BaseGspace(torch.nn.Module):
                     max_step_size = alpha[range(batch_size), v]
 
                     lsv = fd[range(batch_size), s] + fd[range(batch_size), v]
-                    lsv += self._get_C(s)
+                    lsv += self._get_C(s, v)
                     m = torch.cat([l[:, None]
                                    for l in [lsa, lva, lss, lvv, lsv]], dim=1)
                     m = torch.max(m, dim=1)[0]
@@ -354,11 +371,11 @@ class Gspace1d(_BaseGspace):
     def __init__(self, C, tol=1e-9, max_iter=1000, verbose=False,
                  method='lbfgs'):
         super().__init__(tol, max_iter, verbose, method)
-        self.register_buffer('C', C / 2)
+        self.register_buffer('C', - C / 2)
 
     def _get_C(self, s, v):
         return self.C[s, v]
 
     def _log_conv(self, u: torch.tensor):
-        conv = u[:, :, None] + self.C[None, :, :]
+        conv = u[:, None, :] + self.C[None, :, :]
         return torch.logsumexp(conv, dim=2)
