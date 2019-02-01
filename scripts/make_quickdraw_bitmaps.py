@@ -8,9 +8,10 @@ import numpy as np
 import pandas as pd
 from sklearn.utils import check_random_state, shuffle
 
-class_name = 'fire hydrant'
+class_name = 'ambulance'
 size = 64
-lw = 1
+lw = 2
+norm = True
 
 output_dir = expanduser('~/data/quickdraw/bitmaps')
 
@@ -26,14 +27,14 @@ def draw_cv2(raw_strokes, size=256, lw=1, time_color=True):
             _ = cv2.line(img, (stroke[0][i], stroke[1][i]),
                          (stroke[0][i + 1], stroke[1][i + 1]), color, lw)
     if size != 256:
-        return cv2.resize(img, (size, size))
+        return cv2.resize(img, (size, size), interpolation=cv2.INTER_LINEAR)
     else:
         return img
 
 
 random_state = check_random_state(0)
 
-csv_file = expanduser('~/data/quickdraw/fire hydrant.csv')
+csv_file = expanduser(f'~/data/quickdraw/{class_name}.csv')
 df = pd.read_csv(csv_file)
 df = shuffle(df, random_state=random_state)
 
@@ -51,9 +52,13 @@ for fold, n_samples in samples.items():
         if i % 100 == 0:
             print(f'Image {i}')
         x[i, :] = draw_cv2(df['drawing'].iloc[i + offset], time_color=False,
-                           size=size).ravel()
+                           lw=lw, size=size).ravel()
         x[i, :] /= 255
+        if norm:
+            s = np.sum(x[i, :])
+            if s != 0:
+                x[i, :] /= s
     offset += n_samples
     joblib.dump((x, y),
                 expanduser(f'~/data/quickdraw/bitmaps/'
-                           f'{class_name}_{size}_{fold}.pkl'))
+                           f'{class_name}_{size}_{fold}{"_norm" if norm else ""}.pkl'))

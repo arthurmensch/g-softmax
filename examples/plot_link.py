@@ -47,7 +47,7 @@ alpha = alpha[:, None]
 alpha = alpha.to(device)
 
 gspace = Gspace2d(h, w, sigma=3, max_iter=1000, tol=0,
-                  method='fw_pw', logspace=True, verbose=20, )
+                  method='lbfgs', logspace=True, verbose=20, )
 metric_space = gspace.to(device)
 alpha = alpha.to(device)
 

@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn import Parameter
 
+from gsoftmax.lbfgs_scipy import LBFGS as LBFGSscipy
 from gsoftmax.lbfgs_ls import LBFGS
 
 
@@ -131,9 +132,11 @@ class _BaseGspace(torch.nn.Module):
 
     def _log_quadratic(self, l, f):
         batch_size, _ = l.shape
-        lse = torch.logsumexp(l, dim=1)
-        l = l - lse[:, None] + f
+        l = F.log_softmax(l, dim=1) + f
         return torch.logsumexp(l + self._log_conv(l), dim=1)
+
+    def conjugate_obj(self, l, f):
+        return - self._log_quadratic(l, -f / 2)
 
     def _log_quadratic_grad(self, l, f):
         batch_size, _ = l.shape
@@ -196,6 +199,9 @@ class _BaseGspace(torch.nn.Module):
             else:
                 alpha = F.softmax(-2 * fd, dim=1)
 
+            v_init = - self._log_quadratic(safe_log(alpha), fd)
+            v_init = v_init.mean().item()
+
             for k in range(self.max_iter):
                 l = safe_log(alpha)
                 lgrad = self._log_quadratic_grad(l, fd)
@@ -204,7 +210,8 @@ class _BaseGspace(torch.nn.Module):
 
                 laa = torch.logsumexp(l + lgrad, dim=1)
                 m = torch.max(laa, lsa)
-                log_gap = m + torch.log(torch.exp(laa - m) - torch.exp(lsa - m))
+                log_gap = m + torch.log(
+                    torch.exp(laa - m) - torch.exp(lsa - m))
                 gap = torch.exp(log_gap).mean()
 
                 value = - laa
@@ -248,7 +255,8 @@ class _BaseGspace(torch.nn.Module):
                         these_alpha = alpha[range(batch_size), v]
                         max_step_size = torch.ones_like(these_alpha)
 
-                        max_step_size[away_mask] = these_alpha / (1 - these_alpha)
+                        max_step_size[away_mask] = these_alpha / (
+                                    1 - these_alpha)
                         lsa[away_mask] = lva[away_mask]
                         s[away_mask] = v[away_mask]
 
@@ -275,21 +283,23 @@ class _BaseGspace(torch.nn.Module):
 
                 mean_step_size = step_size if self.method == "fw" else step_size.mean()
 
-                if self.verbose and k % 10 == 0:
+                if self.verbose > 10 and k % 10 == 0:
                     info = (f'Iter {k}, gap = {gap:.1f}, '
                             f"value = {value.mean():.5f}, "
-                            f's = {s}, '
+                            # f's = {s}, '
                             f'step_size = {mean_step_size:.2e}')
                     if self.method in ['fw_pw', 'fw_away']:
                         gap_away = torch.exp(log_gap_away).mean()
                         info += f', gap_away = {gap_away:.1f}'
-                    if self.method == 'fw_pw':
-                        info += f', v = {v}'
+                    # if self.method == 'fw_pw':
+                    #     info += f', v = {v}'
                     print(info)
                 if mean_step_size == 0.:
                     break
             value = - self._log_quadratic(safe_log(alpha), fd)
-            print(f'Final iter {k}, gap = {gap:.1f}, value = {value.mean():.5f}, ')
+            if self.verbose:
+                print(f'Initial quadratic value: {v_init:.3f},'
+                      f' maximized value: {value.mean().item():.3f}')
         return value, alpha
 
 
@@ -338,9 +348,12 @@ class Gspace2d(_BaseGspace):
             self.register_buffer('toeph', toeph)
             self.register_buffer('toepw', toepw)
         else:
-            ch = - torch.arange(-h + 1, h, dtype=torch.float32) ** 2 / 4 / sigma ** 2
-            cw = - torch.arange(-w + 1, w, dtype=torch.float32) ** 2 / 4 / sigma ** 2
-            self.register_buffer('kernel', torch.exp(ch[:, None] + cw[None, :]))
+            ch = - torch.arange(-h + 1, h,
+                                dtype=torch.float32) ** 2 / 4 / sigma ** 2
+            cw = - torch.arange(-w + 1, w,
+                                dtype=torch.float32) ** 2 / 4 / sigma ** 2
+            self.register_buffer('kernel',
+                                 torch.exp(ch[:, None] + cw[None, :]))
 
     def _log_conv(self, u: torch.tensor):
         batch_size = u.shape[0]

@@ -1,11 +1,13 @@
-from __future__ import print_function
-
 import os
 from os.path import join, expanduser
 
 import joblib
 import torch
 import torch.utils.data
+
+from sacred import SETTINGS
+SETTINGS.HOST_INFO.INCLUDE_GPU_INFO = False  # equivalent
+
 from sacred import Experiment
 from sacred.observers import FileStorageObserver
 from torch import nn, optim
@@ -15,7 +17,7 @@ from torchvision import datasets
 from torchvision.transforms import transforms
 from torchvision.utils import save_image
 
-from gsoftmax.models import VAE, ConvVAE, LastLayer, WrappedVAE
+from gsoftmax.models import VAE
 from gsoftmax.modules import safe_log, Gspace2d
 
 base_dir = expanduser('~/output/g-softmax/vae')
@@ -48,7 +50,7 @@ def system():
     seed = 0
     source = 'mnist'
     checkpoint = False
-    log_interval = 100
+    log_interval = 1
     supervised_score = False
 
 
@@ -56,17 +58,18 @@ def system():
 def base():
     batch_size = 512
     epochs = 100
-    loss_type = 'geometric'
-    latent_dim = 256
+    loss_type = 'adversarial'
+    latent_dim = 200
     model_type = 'flat'
-    max_iter = 20
+    max_iter = 10
     sigma = 2.
-    regularization = 1
+    regularization = 1.
     lr = 1e-3
 
 
 @exp.capture
-def train(model, optimizer, loader, device, log_interval, epoch, _run):
+def train(model, optimizer, reverse_optimizer,
+          loader, device, log_interval, epoch, _run):
     model.train()
     train_loss = 0
     train_penalty = 0
@@ -78,7 +81,7 @@ def train(model, optimizer, loader, device, log_interval, epoch, _run):
         loss.backward()
         train_loss += loss.item()
         train_penalty += penalty.item()
-        nn.utils.clip_grad_norm_(model.parameters(), 5)
+        nn.utils.clip_grad_norm_(model.parameters(), 1)
         optimizer.step()
         if batch_idx % log_interval == 0:
             print(
@@ -119,17 +122,22 @@ def _test(model, loader, device, epoch, output_dir, gspace, _run):
                 comparison = torch.cat([data[:n], pred[:n]])
                 n_batch, n_channel = comparison.shape[:2]
                 # Normalize
-                comparison /= comparison.view(n_batch, n_channel, -1).max(dim=2)[0][:, :, None, None]
-                filename = join(output_dir, 'reconstruction_' + str(epoch) + '.png')
+                comparison /= \
+                comparison.view(n_batch, n_channel, -1).max(dim=2)[0][:, :,
+                None, None]
+                filename = join(output_dir,
+                                'reconstruction_' + str(epoch) + '.png')
                 save_image(comparison.cpu(), filename, nrow=n)
                 # _run.add_artifact(filename)
 
             data = data.view(batch_size, -1)
             pred = pred.view(batch_size, -1)
-            kl_div += F.kl_div(safe_log(pred), target=data, reduction='sum').item()
+            kl_div += F.kl_div(safe_log(pred), target=data,
+                               reduction='sum').item()
 
             if gspace is not None:
-                bregman_div += gspace.hausdorff(pred, data, reduction='sum').item()
+                bregman_div += gspace.hausdorff(pred, data,
+                                                reduction='sum').item()
 
             bce += F.binary_cross_entropy(pred, target=data,
                                           reduction='sum').item()
@@ -152,7 +160,7 @@ def generate(model, latent_dim, device, output_dir, epoch, _run):
     model.eval()
     with torch.no_grad():
         sample = torch.randn(64, latent_dim).to(device)
-        pred = model.decode(sample)
+        pred = model.decoder(sample)
         # Normalize
         pred /= pred.view(
             pred.shape[0], pred.shape[1], -1).max(dim=2)[0][:, :, None, None]
@@ -162,9 +170,11 @@ def generate(model, latent_dim, device, output_dir, epoch, _run):
 
 
 @exp.capture
-def save_checkpoint(model, optimizer, output_dir, epoch, _run):
+def save_checkpoint(model, optimizer, reverse_optimizer,
+                    output_dir, epoch, _run):
     state_dict = {'model': model.state_dict(),
                   'optimizer': optimizer.state_dict(),
+                  'reverse_optimizer': reverse_optimizer.state_dict(),
                   'epoch': epoch}
     filename = join(output_dir, f'checkpoint_{epoch}.pkl')
     torch.save(state_dict, filename)
@@ -174,21 +184,19 @@ def save_checkpoint(model, optimizer, output_dir, epoch, _run):
 @exp.automain
 def run(device, loss_type, source, cuda, batch_size, checkpoint,
         epochs, latent_dim, model_type, max_iter, sigma,
-        lr,
-        _seed, _run):
+        regularization, lr, _seed, _run):
     torch.manual_seed(_seed)
     device = torch.device(f"cuda:{device}" if cuda else "cpu")
-
-    if loss_type == 'bce':
-        transform = transforms.ToTensor()
-    elif loss_type in ['kl', 'geometric']:
-        transform = transforms.Compose([transforms.ToTensor(), ToProb()])
-    else:
-        raise ValueError(f'Wrong `loss_type` argument, got {loss_type}')
 
     kwargs = {'num_workers': 1, 'pin_memory': True} if cuda else {}
 
     if source == 'mnist':
+        if loss_type == 'bce':
+            transform = transforms.ToTensor()
+        elif loss_type in ['kl', 'geometric', 'adversarial']:
+            transform = transforms.Compose([transforms.ToTensor(), ToProb()])
+        else:
+            raise ValueError(f'Wrong `loss_type` argument, got {loss_type}')
         train_data = datasets.MNIST(expanduser('~/data'), train=True,
                                     download=True,
                                     transform=transform)
@@ -202,7 +210,9 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
         h = w = size
         data = {}
         for fold in ['train', 'test']:
-            filename = join(data_dir, f'{class_name}_{size}_{fold}.pkl')
+            filename = join(data_dir,
+                            f'{class_name}_{size}_{fold}'
+                            f'{"_norm" if loss_type != "bce" else ""}.pkl')
             x, y = joblib.load(filename)
             x, y = torch.from_numpy(x), torch.from_numpy(y)
             x = x.view(x.shape[0], 1, h, w)
@@ -217,25 +227,26 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
     test_loader = torch.utils.data.DataLoader(test_data,
                                               batch_size=batch_size,
                                               shuffle=True, **kwargs)
-    if model_type == 'conv':
-        vae = ConvVAE(h, w, latent_dim).to(device)
-    else:
-        vae = VAE(h, w, latent_dim).to(device)
 
     gspace = Gspace2d(h, w, sigma=sigma, tol=1e-4, max_iter=max_iter,
-                      verbose=True)
-    last_layer = LastLayer(loss_type=loss_type, gspace=gspace)
-
-    model = WrappedVAE(vae, last_layer)
+                      method='lbfgs',
+                      verbose=False)
+    model = VAE(h, w, latent_dim,
+                loss_type=loss_type, model_type=model_type,
+                gspace=gspace, regularization=regularization)
 
     model = model.to(device)
 
-    optimizer = optim.Adam(vae.parameters(), lr=lr)
-
+    optimizer = optim.Adam(model.prob_decoder.parameters(), lr=lr)
+    if loss_type == 'adversarial':
+        reverse_optimizer = optim.Adam(model.prob_decoder.parameters())
+    else:
+        reverse_optimizer = None
     if checkpoint:
         state_dict = torch.load(checkpoint)
         model.load_state_dict(state_dict['model'])
-        optimizer.load_state_dict(state_dict['optimizer'])
+        reverse_optimizer.load_state_dict(state_dict['reverse_optimizer'])
+        optimizer.load_state_dict(state_dict['reverse_optimizer'])
         start_epoch = state_dict['epoch']
     else:
         start_epoch = 0
@@ -245,7 +256,8 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
         os.makedirs(output_dir)
 
     for epoch in range(start_epoch, epochs + 1):
-        train(model=model, optimizer=optimizer, loader=train_loader,
+        train(model=model, optimizer=optimizer, reverse_optimizer=reverse_optimizer,
+              loader=train_loader,
               epoch=epoch, device=device)
         _test(model=model, loader=test_loader, epoch=epoch, device=device,
               gspace=gspace,  # To track Hausdorff distance
@@ -253,5 +265,7 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
         generate(model=model, epoch=epoch, device=device,
                  output_dir=output_dir)
         if epoch % 10 == 0:
-            save_checkpoint(model=vae, optimizer=optimizer, epoch=epoch,
+            save_checkpoint(model=model, optimizer=optimizer,
+                            reverse_optimizer=reverse_optimizer,
+                            epoch=epoch,
                             output_dir=output_dir)
