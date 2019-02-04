@@ -203,7 +203,7 @@ class VAE(nn.Module):
         if self.loss_type != 'adversarial':
             return logits, mu, logvar
         else:
-            prob = GradientReversal.apply(self.prob_decoder(z.detach()))
+            prob = self.prob_decoder(z.detach())
             return (logits, prob), mu, logvar
 
     def forward(self, x, return_penalty=False):

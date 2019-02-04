@@ -58,7 +58,7 @@ def system():
 def base():
     batch_size = 512
     epochs = 100
-    loss_type = 'adversarial'
+    loss_type = 'geometric'
     latent_dim = 200
     model_type = 'flat'
     max_iter = 10
@@ -76,9 +76,26 @@ def train(model, optimizer, reverse_optimizer,
 
     for batch_idx, (data, _) in enumerate(loader):
         data = data.to(device)
-        optimizer.zero_grad()
-        loss, penalty = model(data, return_penalty=True)
-        loss.backward()
+        if reverse_optimizer is None:
+            optimizer.zero_grad()
+            loss, penalty = model(data, return_penalty=True)
+            loss.backward()
+        else:
+            # Maximization part
+            for _ in range(100):
+                optimizer.zero_grad()
+                reverse_optimizer.zero_grad()
+                loss, penalty = model(data, return_penalty=True)
+                (- loss).backward()
+                reverse_optimizer.step()
+
+            # Minimization part
+            optimizer.zero_grad()
+            reverse_optimizer.zero_grad()
+            loss, penalty = model(data, return_penalty=True)
+            loss.backward()
+            optimizer.step()
+
         train_loss += loss.item()
         train_penalty += penalty.item()
         nn.utils.clip_grad_norm_(model.parameters(), 1)
@@ -174,7 +191,7 @@ def save_checkpoint(model, optimizer, reverse_optimizer,
                     output_dir, epoch, _run):
     state_dict = {'model': model.state_dict(),
                   'optimizer': optimizer.state_dict(),
-                  'reverse_optimizer': reverse_optimizer.state_dict(),
+                  'reverse_optimizer': reverse_optimizer.state_dict() if reverse_optimizer is not None else None,
                   'epoch': epoch}
     filename = join(output_dir, f'checkpoint_{epoch}.pkl')
     torch.save(state_dict, filename)
@@ -237,7 +254,8 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
 
     model = model.to(device)
 
-    optimizer = optim.Adam(model.prob_decoder.parameters(), lr=lr)
+    optimizer = optim.Adam(list(model.decoder.parameters()) +
+                           list(model.encoder.parameters()), lr=lr)
     if loss_type == 'adversarial':
         reverse_optimizer = optim.Adam(model.prob_decoder.parameters())
     else:
@@ -245,7 +263,8 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
     if checkpoint:
         state_dict = torch.load(checkpoint)
         model.load_state_dict(state_dict['model'])
-        reverse_optimizer.load_state_dict(state_dict['reverse_optimizer'])
+        if reverse_optimizer is not None:
+            reverse_optimizer.load_state_dict(state_dict['reverse_optimizer'])
         optimizer.load_state_dict(state_dict['reverse_optimizer'])
         start_epoch = state_dict['epoch']
     else:
