@@ -24,7 +24,7 @@ class GradientStop(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output.fill_(0.)
+        return torch.zeros_like(grad_output)
 
 
 class Encoder(nn.Module):
@@ -91,7 +91,7 @@ class ConvDecoder(nn.Module):
         self.h, self.w = h, w
         nc = 1
         ngf = 64
-        self.deconv = nn.Sequential([
+        self.deconv = nn.Sequential(
             nn.ConvTranspose2d(latent_dim, ngf * 8, 4, 1, 0, bias=False),
             nn.BatchNorm2d(ngf * 8),
             nn.ReLU(True),
@@ -109,7 +109,7 @@ class ConvDecoder(nn.Module):
             nn.ReLU(True),
             # state size. (ngf) x 32 x 32
             nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False)
-        ])
+        )
 
     def forward(self, z):
         z = z[:, :, None, None]
@@ -121,8 +121,7 @@ class LastLayer(nn.Module):
         super().__init__()
         self.loss_type = loss_type
 
-        if self.loss_type in ['geometric', 'adversarial']:
-            self.gspace = gspace
+        self.gspace = gspace
 
     def pred(self, logits):
         if self.loss_type == 'adversarial':
@@ -140,7 +139,12 @@ class LastLayer(nn.Module):
         elif self.loss_type == 'geometric':
             rec = self.gspace.softmax(logits)
         elif self.loss_type == 'adversarial':
-            rec = self.gspace.softmax(prob)
+            rec = F.softmax((logits + prob) / 2, dim=1)
+            clean_rec = F.softmax(logits, dim=1)
+            diff = (torch.sum(torch.abs(rec - clean_rec), dim=1) /
+                    torch.sum(torch.abs(clean_rec), dim=1)).mean()
+            print(diff)
+            # rec = self.gspace.softmax(logits * 2)
         else:
             raise ValueError
         return rec.view(n_batch, n_channel, h, w)
@@ -165,9 +169,10 @@ class LastLayer(nn.Module):
             loss = mlse - torch.sum(logits * target, dim=1)
             loss = loss.sum() * h * w
         elif self.loss_type == 'adversarial':
-            prob = F.log_softmax(prob, dim=1)
-            loss = (self.gspace.conjugate_obj(prob, logits)
-                    - torch.sum(logits * target, dim=1))
+            loss = (2 * torch.logsumexp((logits + prob) / 2, dim=1)
+                    - torch.sum(logits * target, dim=1)
+                    - torch.logsumexp(prob / 2 + self.gspace._log_conv(prob / 2), dim=1)
+                    )
             loss = loss.sum()
         else:
             raise ValueError
@@ -179,16 +184,24 @@ class VAE(nn.Module):
                  loss_type='bce', gspace=None, regularization=1):
         super().__init__()
         if model_type == 'flat':
-            self.encoder = Encoder(h, w, latent_dim)
-            self.decoder = Decoder(h, w, latent_dim)
-        elif model_type == 'conv':
-            self.encoder = ConvEncoder(h, w, latent_dim)
-            self.decoder = Decoder(h, w, latent_dim)
+            encoder_type, decoder_type = Encoder, Decoder
+        else:
+            encoder_type, decoder_type = ConvEncoder, ConvDecoder
+
+        self.encoder = encoder_type(h, w, latent_dim)
+        self.decoder = decoder_type(h, w, latent_dim)
+        if loss_type == 'adversarial':
+            self.prob_decoder = decoder_type(h, w, latent_dim)
         self.loss_type = loss_type
         self.last_layer = LastLayer(loss_type, gspace)
-        if loss_type == 'adversarial':
-            self.prob_decoder = copy.deepcopy(self.decoder)
         self.regularization = regularization
+
+        # self.reset_parameters()
+
+    def reset_parameters(self):
+        if hasattr(self, 'prob_decoder'):
+            for param in self.prob_decoder.parameters():
+                param.data.fill_(0.)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
@@ -203,7 +216,9 @@ class VAE(nn.Module):
         if self.loss_type != 'adversarial':
             return logits, mu, logvar
         else:
-            prob = self.prob_decoder(z.detach())
+            prob = self.prob_decoder(z)
+            if torch.is_grad_enabled():
+                prob.register_hook(lambda grad: grad.neg())
             return (logits, prob), mu, logvar
 
     def forward(self, x, return_penalty=False):
@@ -216,3 +231,12 @@ class VAE(nn.Module):
 
     def pred(self, x):
         return self.last_layer.pred(self.pred_latent_and_logits(x)[0])
+
+    def pred_from_latent(self, z):
+        logits = self.decoder(z)
+
+        if self.loss_type == 'adversarial':
+            prob = self.prob_decoder(z.detach())
+            logits = (logits, prob)
+        return self.last_layer.pred(logits)
+

@@ -48,9 +48,9 @@ def system():
     cuda = True
     device = 0
     seed = 0
-    source = 'mnist'
+    source = 'quickdraw_ambulance_64'
     checkpoint = False
-    log_interval = 1
+    log_interval = 10
     supervised_score = False
 
 
@@ -58,12 +58,12 @@ def system():
 def base():
     batch_size = 512
     epochs = 100
-    loss_type = 'geometric'
-    latent_dim = 200
-    model_type = 'flat'
-    max_iter = 10
+    loss_type = 'adversarial'
+    latent_dim = 100
+    model_type = 'conv'
+    max_iter = 50
     sigma = 2.
-    regularization = 1.
+    regularization = .01
     lr = 1e-3
 
 
@@ -82,12 +82,11 @@ def train(model, optimizer, reverse_optimizer,
             loss.backward()
         else:
             # Maximization part
-            for _ in range(100):
-                optimizer.zero_grad()
-                reverse_optimizer.zero_grad()
-                loss, penalty = model(data, return_penalty=True)
-                (- loss).backward()
-                reverse_optimizer.step()
+            optimizer.zero_grad()
+            reverse_optimizer.zero_grad()
+            loss, penalty = model(data, return_penalty=True)
+            (- loss).backward()
+            reverse_optimizer.step()
 
             # Minimization part
             optimizer.zero_grad()
@@ -177,7 +176,7 @@ def generate(model, latent_dim, device, output_dir, epoch, _run):
     model.eval()
     with torch.no_grad():
         sample = torch.randn(64, latent_dim).to(device)
-        pred = model.decoder(sample)
+        pred = model.pred_from_latent(sample)
         # Normalize
         pred /= pred.view(
             pred.shape[0], pred.shape[1], -1).max(dim=2)[0][:, :, None, None]
@@ -214,10 +213,10 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
             transform = transforms.Compose([transforms.ToTensor(), ToProb()])
         else:
             raise ValueError(f'Wrong `loss_type` argument, got {loss_type}')
-        train_data = datasets.MNIST(expanduser('~/data'), train=True,
+        train_data = datasets.MNIST(expanduser('~/data/mnist'), train=True,
                                     download=True,
                                     transform=transform)
-        test_data = datasets.MNIST(expanduser('~/data'), train=False,
+        test_data = datasets.MNIST(expanduser('~/data/mnist'), train=False,
                                    transform=transform)
         h, w = 28, 28
     elif 'quickdraw' in source:
@@ -256,10 +255,10 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
 
     optimizer = optim.Adam(list(model.decoder.parameters()) +
                            list(model.encoder.parameters()), lr=lr)
-    if loss_type == 'adversarial':
-        reverse_optimizer = optim.Adam(model.prob_decoder.parameters())
-    else:
-        reverse_optimizer = None
+    # if loss_type == 'adversarial':
+    #     reverse_optimizer = optim.Adam(model.prob_decoder.parameters())
+    # else:
+    reverse_optimizer = None
     if checkpoint:
         state_dict = torch.load(checkpoint)
         model.load_state_dict(state_dict['model'])
@@ -283,7 +282,7 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
               output_dir=output_dir)
         generate(model=model, epoch=epoch, device=device,
                  output_dir=output_dir)
-        if epoch % 10 == 0:
+        if epoch % 50 == 0:
             save_checkpoint(model=model, optimizer=optimizer,
                             reverse_optimizer=reverse_optimizer,
                             epoch=epoch,
