@@ -6,6 +6,7 @@ import torch
 import torch.utils.data
 
 from sacred import SETTINGS
+
 SETTINGS.HOST_INFO.INCLUDE_GPU_INFO = False  # equivalent
 
 from sacred import Experiment
@@ -58,13 +59,16 @@ def system():
 def base():
     batch_size = 512
     epochs = 100
-    loss_type = 'adversarial'
-    latent_dim = 100
+    loss_type = 'geometric'
+    latent_dim = 256
     model_type = 'conv'
-    max_iter = 50
-    sigma = 2.
+    max_iter = 5
+    sigma = 3.
     regularization = .01
     lr = 1e-3
+    # adversarial specific
+    prob_param = 'sigmoid'
+    gradient_reversal = False
 
 
 @exp.capture
@@ -76,24 +80,17 @@ def train(model, optimizer, reverse_optimizer,
 
     for batch_idx, (data, _) in enumerate(loader):
         data = data.to(device)
-        if reverse_optimizer is None:
-            optimizer.zero_grad()
-            loss, penalty = model(data, return_penalty=True)
-            loss.backward()
-        else:
-            # Maximization part
-            optimizer.zero_grad()
+
+        if reverse_optimizer is not None and batch_idx % 5 == 0:
             reverse_optimizer.zero_grad()
             loss, penalty = model(data, return_penalty=True)
             (- loss).backward()
             reverse_optimizer.step()
 
-            # Minimization part
-            optimizer.zero_grad()
-            reverse_optimizer.zero_grad()
-            loss, penalty = model(data, return_penalty=True)
-            loss.backward()
-            optimizer.step()
+        optimizer.zero_grad()
+        loss, penalty = model(data, return_penalty=True)
+        loss.backward()
+        optimizer.step()
 
         train_loss += loss.item()
         train_penalty += penalty.item()
@@ -139,8 +136,8 @@ def _test(model, loader, device, epoch, output_dir, gspace, _run):
                 n_batch, n_channel = comparison.shape[:2]
                 # Normalize
                 comparison /= \
-                comparison.view(n_batch, n_channel, -1).max(dim=2)[0][:, :,
-                None, None]
+                    comparison.view(n_batch, n_channel, -1).max(dim=2)[0][:, :,
+                    None, None]
                 filename = join(output_dir,
                                 'reconstruction_' + str(epoch) + '.png')
                 save_image(comparison.cpu(), filename, nrow=n)
@@ -199,8 +196,8 @@ def save_checkpoint(model, optimizer, reverse_optimizer,
 
 @exp.automain
 def run(device, loss_type, source, cuda, batch_size, checkpoint,
-        epochs, latent_dim, model_type, max_iter, sigma,
-        regularization, lr, _seed, _run):
+        epochs, latent_dim, model_type, max_iter, sigma, prob_param,
+        gradient_reversal, regularization, lr, _seed, _run):
     torch.manual_seed(_seed)
     device = torch.device(f"cuda:{device}" if cuda else "cpu")
 
@@ -249,16 +246,20 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
                       verbose=False)
     model = VAE(h, w, latent_dim,
                 loss_type=loss_type, model_type=model_type,
-                gspace=gspace, regularization=regularization)
+                gspace=gspace, regularization=regularization,
+                prob_param=prob_param,
+                gradient_reversal=gradient_reversal)
 
     model = model.to(device)
 
-    optimizer = optim.Adam(list(model.decoder.parameters()) +
-                           list(model.encoder.parameters()), lr=lr)
-    # if loss_type == 'adversarial':
-    #     reverse_optimizer = optim.Adam(model.prob_decoder.parameters())
-    # else:
-    reverse_optimizer = None
+    if loss_type == 'adversarial' and not gradient_reversal:
+        optimizer = optim.Adam(list(model.decoder.parameters()) +
+                               list(model.encoder.parameters()), lr=lr)
+        reverse_optimizer = optim.Adam(model.prob_decoder.parameters())
+    else:
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+        reverse_optimizer = None
+
     if checkpoint:
         state_dict = torch.load(checkpoint)
         model.load_state_dict(state_dict['model'])
@@ -274,7 +275,8 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
         os.makedirs(output_dir)
 
     for epoch in range(start_epoch, epochs + 1):
-        train(model=model, optimizer=optimizer, reverse_optimizer=reverse_optimizer,
+        train(model=model, optimizer=optimizer,
+              reverse_optimizer=reverse_optimizer,
               loader=train_loader,
               epoch=epoch, device=device)
         _test(model=model, loader=test_loader, epoch=epoch, device=device,

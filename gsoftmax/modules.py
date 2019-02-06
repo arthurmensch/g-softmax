@@ -107,6 +107,21 @@ class _BaseGspace(torch.nn.Module):
     def potential(self, alpha):
         return self.entropy_and_potential(alpha)[1]
 
+    def potential_ad(self, alpha):
+        f = torch.zeros_like(alpha)
+        log_alpha = safe_log(alpha)
+        for i in range(self.max_iter):
+            g = self.c_transform(f, log_alpha)
+            diff = f - g
+            gap = (torch.max(diff, dim=1)[0]
+                   - torch.min(diff, dim=1)[0]).mean()
+            if self.verbose:
+                print(f'[Negentropy] Iter {i}, gap {gap}')
+            if gap.mean() < self.tol:
+                break
+            f = .5 * (f + g)
+        return -f
+
     def hausdorff(self, input, target, reduction='mean'):
         true_entropy = self.entropy(input)
         pred_entropy, potential = self.entropy_and_potential(target)
