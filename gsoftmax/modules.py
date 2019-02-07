@@ -48,29 +48,38 @@ class _BaseGspace(torch.nn.Module):
                  max_iter=1000,
                  verbose=False,
                  method='lbfgs',
+                 create_graph=False
                  ):
         super().__init__()
         self.max_iter = max_iter
         self.tol = tol
         self.verbose = verbose
 
+        self.create_graph = create_graph
+
         self.method = method
 
     def _entropy(self, alpha: torch.tensor):
-        with torch.no_grad():
-            f = torch.zeros_like(alpha)
-            log_alpha = safe_log(alpha)
-            for i in range(self.max_iter):
-                g = self.c_transform(f, log_alpha)
+        is_grad_enabled = torch.is_grad_enabled()
+        if self.create_graph:
+            torch.set_grad_enabled(is_grad_enabled)
+        else:
+            torch.set_grad_enabled(False)
+        f = torch.zeros_like(alpha)
+        log_alpha = safe_log(alpha)
+        for i in range(self.max_iter):
+            g = self.c_transform(f, log_alpha)
+            with torch.no_grad():
                 diff = f - g
                 gap = (torch.max(diff, dim=1)[0]
                        - torch.min(diff, dim=1)[0]).mean()
                 if self.verbose:
                     print(f'[Negentropy] Iter {i}, gap {gap}')
-                if gap.mean() < self.tol:
-                    break
-                f = .5 * (f + g)
-            f = -f
+            if gap.mean() < self.tol:
+                break
+            f = .5 * (f + g)
+        f = -f
+        torch.set_grad_enabled(is_grad_enabled)
         return (f * alpha).sum(dim=1), f
 
     def _lse(self, f: torch.tensor, init=None):
@@ -101,26 +110,12 @@ class _BaseGspace(torch.nn.Module):
         with torch.enable_grad():
             alpha = Parameter(alpha)
             entropy = self.entropy(alpha)
-            potentials, = torch.autograd.grad(entropy.sum(), (alpha,))
+            potentials, = torch.autograd.grad(entropy.sum(), (alpha,),
+                                              create_graph=self.create_graph)
         return entropy, potentials
 
     def potential(self, alpha):
-        return self.entropy_and_potential(alpha)[1]
-
-    def potential_ad(self, alpha):
-        f = torch.zeros_like(alpha)
-        log_alpha = safe_log(alpha)
-        for i in range(self.max_iter):
-            g = self.c_transform(f, log_alpha)
-            diff = f - g
-            gap = (torch.max(diff, dim=1)[0]
-                   - torch.min(diff, dim=1)[0]).mean()
-            if self.verbose:
-                print(f'[Negentropy] Iter {i}, gap {gap}')
-            if gap.mean() < self.tol:
-                break
-            f = .5 * (f + g)
-        return -f
+        return self._entropy(alpha)[1]
 
     def hausdorff(self, input, target, reduction='mean'):
         true_entropy = self.entropy(input)
@@ -336,11 +331,12 @@ class Gspace2d(_BaseGspace):
                  max_iter=1000,
                  verbose=False,
                  method='lbfgs',
+                 create_graph=True,
                  logspace=True,
                  ):
         """Fast implementation using separable convolution."""
 
-        super().__init__(tol, max_iter, verbose, method)
+        super().__init__(tol, max_iter, verbose, method, create_graph)
 
         self.n_channels = n_channels
         self.h = h
@@ -396,8 +392,8 @@ class Gspace2d(_BaseGspace):
 
 class Gspace1d(_BaseGspace):
     def __init__(self, C, tol=1e-9, max_iter=1000, verbose=False,
-                 method='lbfgs'):
-        super().__init__(tol, max_iter, verbose, method)
+                 method='lbfgs', create_graph=False):
+        super().__init__(tol, max_iter, verbose, method, create_graph)
         self.register_buffer('C', - C / 2)
 
     def _get_C(self, s, v):
