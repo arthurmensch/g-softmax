@@ -7,14 +7,14 @@ from gsoftmax.sampling import draw_samples, display_samples
 
 n_points = 200
 
-x, a = draw_samples("data/density_a.png", n_points, torch.float)
+x, a = draw_samples("data/density_a.png", n_points)
 x = torch.from_numpy(x).float()
 a = torch.from_numpy(a).float()
 a = torch.log(a)
 a = a[None, :]
 x = x[None, :]
 
-y, b = draw_samples("data/density_b.png", n_points + 10, torch.float)
+y, b = draw_samples("data/density_b.png", n_points + 10)
 y = torch.from_numpy(y).float()
 b = torch.from_numpy(b).float()
 b = torch.log(b)
@@ -95,11 +95,13 @@ def gradient_flow(x, a, y, b, cost, lr=.05):
     print("Done.")
 
 
-sinkhorn_divergence = MeasureDistance(kernel='laplacian',
-                                      loss='sinkhorn_decoupled_asym',
+sinkhorn_divergence = MeasureDistance(kernel='energy_squared',
+                                      loss='sinkhorn',
+                                      coupled=False,
+                                      distance_type=2,
                                       max_iter=100,
                                       sigma=1,
-                                      epsilon=1)
+                                      epsilon=1e-3)
 
 gradient_flow(x, a, y, b, sinkhorn_divergence, lr=.1)
 

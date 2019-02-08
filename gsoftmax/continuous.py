@@ -37,10 +37,11 @@ def bmm(x, y):
 
 
 class MeasureDistance(nn.Module):
-    def __init__(self, loss: str = 'sinkhorn', decoupled: bool = True,
+    def __init__(self, loss: str = 'sinkhorn', coupled: bool = True,
                  symmetric: bool = True, epsilon: float = 1.,
                  tol: float = 1e-6, max_iter: int = 10,
                  kernel: str = 'energy', distance_type: int = 2,
+                 target_position='left',
                  sigma: float = 1, verbose: bool = False):
         """
 
@@ -63,8 +64,9 @@ class MeasureDistance(nn.Module):
         self.verbose = verbose
         assert loss in ['sinkhorn', 'mmd']
         self.loss = loss
-        self.coupled = decoupled
+        self.coupled = coupled
         self.symmetric = symmetric
+        self.target_position = target_position
 
         assert distance_type in [1, 2]
         self.distance_type = distance_type
@@ -89,12 +91,13 @@ class MeasureDistance(nn.Module):
             norm_x = torch.sum(x ** 2, dim=2)
             norm_y = torch.sum(y ** 2, dim=2)
             divider = 1 if self.kernel in ['energy', 'laplacian'] else 2
+            power = 2 if self.kernel in ['energy', 'laplacian'] else 1
             distance = ((norm_x[:, :, None] + norm_y[:, None, :] - 2 * outer) /
-                        (divider * self.sigma ** 2 * epsilon))
+                        (divider * self.sigma ** 2 * epsilon ** power))
             distance.clamp_(min=0.)
 
             if self.kernel in ['energy', 'laplacian']:
-                distance = torch.sqrt(distance)
+                distance = torch.sqrt(distance + 1e-8)
                 if self.kernel == 'energy':
                     return - distance
                 elif self.kernel == 'laplacian':
@@ -132,6 +135,9 @@ class MeasureDistance(nn.Module):
         :param b: shape(batch_size, k)
         :return:
         """
+        if not self.coupled and y is not None:
+            return self.potential(x, a), self.potential(y, b)
+
         kernels, potentials = {}, {}
 
         kernels['xx'] = self.make_kernel(x, x)
@@ -143,11 +149,11 @@ class MeasureDistance(nn.Module):
 
         if self.loss == 'mmd':
             a = a.exp()
-            b = b.exp()
             potentials['xx'] = - bmm(kernels['xx'], a) / 2
             if not self.coupled:
                 return potentials['xx']
-            potentials['yx'] = - bmm(kernels['xy'], x) / 2
+            b = b.exp()
+            potentials['yx'] = - bmm(kernels['yx'], a) / 2
             potentials['xy'] = - bmm(kernels['xy'], b) / 2
             potentials['yy'] = - bmm(kernels['yy'], b) / 2
             return (potentials['xy'] - potentials['xx'],
@@ -165,22 +171,23 @@ class MeasureDistance(nn.Module):
                               xy=torch.zeros_like(a), yy=torch.zeros_like(b))
             runnings = dict(xx=True, yx=True, xy=True, yy=True)
 
-        with torch.no_grad():
-            n_iter = 0
-            while any(runnings.values()) and n_iter < self.max_iter:
-                for dir, running in runnings.items():
-                    if running:
-                        new_potential = self.extrapolate(potentials[_opp(dir)],
-                                                         kernel=kernels[dir])
-                        gap = duality_gap(new_potential, potentials[dir])
-                        if gap < self.tol:
-                            runnings[dir] = False
-                        potentials[dir] *= .5
-                        potentials[dir] += .5 * new_potential
-                if self.coupled:
-                    runnings['yx'] = runnings['yx'] or runnings['xy']
-                    runnings['xy'] = runnings['yx']
-                n_iter += 1
+        # with torch.no_grad():
+        n_iter = 0
+        while any(runnings.values()) and n_iter < self.max_iter:
+            for dir, running in runnings.items():
+                if running:
+                    new_potential = self.extrapolate(potentials[_opp(dir)],
+                                                     kernel=kernels[dir])
+                    gap = duality_gap(new_potential, potentials[dir])
+                    print(dir, gap)
+                    if gap < self.tol:
+                        runnings[dir] = False
+                    potentials[dir] *= .5
+                    potentials[dir] += .5 * new_potential
+            if self.coupled:
+                runnings['yx'] = runnings['yx'] or runnings['xy']
+                runnings['xy'] = runnings['yx']
+            n_iter += 1
         potentials_extra = {}
         for dir in kernels:  # Extrapolation step
             potentials_extra[dir] = self.extrapolate(potentials[_opp(dir)],
@@ -202,7 +209,7 @@ class MeasureDistance(nn.Module):
                 y: torch.tensor, b: torch.tensor):
         epsilon = 1 if self.loss == 'mmd' else self.epsilon
         if 'decoupled' in self.loss:
-            if self.target_position == 'right' and not self.symmetric:
+            if self.target_position == 'left' and not self.symmetric:
                 x, a, y, b = y, b, x, a
             f = self.potential(x, a)
             fe = self.extrapolate(f, x=x, a=a, y=y)
