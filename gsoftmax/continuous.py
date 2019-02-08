@@ -3,79 +3,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class Hausdorff(nn.Module):
-    def __init__(self, max_iter=100, sigma=1, tol=1e-6,
-                 kernel='gaussian', normalize=False, verbose=False):
-        super().__init__()
-        self.max_iter = max_iter
-        self.tol = tol
-        self.sigma = sigma
-        self.kernel = kernel
-        self.normalize = normalize
-        self.verbose = verbose
-
-    def make_kernel(self, x: torch.tensor, y: torch.tensor):
-        """
-
-        :param x: shape(batch_size, l, d)
-        :param y: shape(batch_size, k, d)
-        :return: kernel: shape(batch_size, length, dim)
-        """
-        if self.kernel == 'gaussian':
-            outer = torch.einsum('bld,bkd->blk', x, y)
-            norm_x = torch.sum(x ** 2, dim=2)
-            norm_y = torch.sum(y ** 2, dim=2)
-            return - ((norm_x[:, :, None] + norm_y[:, None, :]
-                       - 2 * outer)
-                      / 2 / self.sigma ** 2)
-        elif self.kernel == 'laplacian':
-            diff = torch.einsum('bld,bkd->blkd', x, y)
-            return - torch.sum(torch.abs(diff), dim=3) / self.sigma
-        else:
-            raise ValueError
-
-    def potential(self, pos: torch.tensor, log_weights: torch.tensor, ):
-        """
-
-        :param pos: shape (batch_size, length, dim)
-        :param log_weights:  shape (batch_size, length)
-        :return:
-        """
-        kernel = self.make_kernel(pos, pos)
-        f = torch.zeros_like(log_weights)
-        for i in range(self.max_iter):
-            g = - torch.logsumexp(kernel + f[:, None, :]
-                                  + log_weights[:, None, :], dim=2)
-            with torch.no_grad():
-                diff = f - g
-                gap = (torch.max(diff, dim=1)[0]
-                       - torch.min(diff, dim=1)[0]).mean()
-                if self.verbose:
-                    print(f'[Negentropy] Iter {i}, gap {gap}')
-            if gap.mean() < self.tol:
-                break
-            f = (f + g) / 2
-        return f
-
-    def forward(self, pos: torch.tensor, log_weights: torch.tensor,
-                target_pos: torch.tensor, target_log_weights: torch.tensor):
-        f = self.forward(pos, log_weights)
-        kernel = self.make_kernel(target_pos, pos)
-        g = - torch.logsumexp(kernel + f[:, None, :]
-                              + log_weights[:, None, :], dim=2)
-        res = torch.sum(g * torch.exp(target_log_weights), dim=1)
-        if self.normalize:
-            res -= torch.sum(f * torch.exp(log_weights), dim=1)
-        return res
-
-
 def duality_gap(f, fn):
     diff = f - fn
-    return (torch.max(diff, dim=1)[0] - torch.min(diff, dim=1)[0]).mean()
+    return (torch.max(diff, dim=1)[0] - torch.min(diff, dim=1)[
+        0]).mean().item()
 
 
-class Sinkhorn(nn.Module):
-    def __init__(self, max_iter=100, sigma=1, tol=1e-6,
+def opp(dir):
+    if dir in ['xx', 'yy']:
+        return dir
+    elif dir == 'xy':
+        return 'yx'
+    else:
+        return 'xy'
+
+
+def bmm(x, y):
+    return torch.einsum('blk,bk->bl', x, y)
+
+
+class MeasureDistance(nn.Module):
+    def __init__(self, max_iter=10, sigma=1, tol=1e-6,
                  kernel='gaussian', epsilon=1,
                  loss='sinkhorn',
                  verbose=False):
@@ -101,11 +49,12 @@ class Sinkhorn(nn.Module):
                         'sinkhorn_decoupled_asym',
                         'mmd', 'mmd_decoupled', 'mmd_decoupled_asym']
 
-        assert kernel in ['l1', 'l2', 'l22', 'gaussian', 'laplacian']
+        assert kernel in ['l1', 'l2', 'l22', 'gaussian', 'laplacian',
+                          'laplacian_l2']
 
         if 'mmd' in loss:
-            assert epsilon == 1
-            assert kernel != 'l22'
+            self.epsilon = 1
+            # assert kernel != 'l22'
 
         self.loss = loss
 
@@ -117,27 +66,30 @@ class Sinkhorn(nn.Module):
         :return: kernel: shape(batch_size, l, k)
             Negative kernel matrix
         """
-        if self.kernel in ['l22', 'l2', 'gaussian']:
+        if self.kernel in ['l22', 'l2', 'gaussian', 'laplacian_l2']:
             outer = torch.einsum('bld,bkd->blk', x, y)
             norm_x = torch.sum(x ** 2, dim=2)
             norm_y = torch.sum(y ** 2, dim=2)
             distance = ((norm_x[:, :, None] + norm_y[:, None, :]
                          - 2 * outer)
-                        / 2 / self.sigma ** 2 / self.epsilon)
+                        / 2 / self.sigma ** 2)
+            distance.clamp_(min=0.)
             if self.kernel == 'l22':
-                return distance
+                return - distance
             elif self.kernel == 'l2':
-                return torch.sqrt(distance)
+                return - torch.sqrt(distance + 1e-8)
             elif self.kernel == 'gaussian':
-                return - torch.exp(-distance)
+                return torch.exp(-distance)
+            elif self.kernel == 'laplacian_l2':
+                return torch.exp(- torch.sqrt(distance + 1e-8))
         elif self.kernel in ['l1', 'laplacian']:
-            diff = torch.einsum('bld,bkd->blkd', x, y)
+            diff = x[:, :, None, :] - y[:, None, :, :]
             distance = (torch.sum(torch.abs(diff), dim=3)
-                        / self.sigma / self.epsilon)
+                        / self.sigma)
             if self.kernel == 'l1':
-                return distance
+                return - distance
             else:
-                return - torch.exp(-distance)
+                return torch.exp(-distance)
         else:
             raise ValueError
 
@@ -155,81 +107,96 @@ class Sinkhorn(nn.Module):
         """
         kernels, potentials = {}, {}
 
-        kernels['xx'] = self.make_kernels(x, x)
+        kernels['xx'] = self.make_kernel(x, x)
 
-        if y is not None or not 'decoupled' in self.loss:
-            kernels['yx'] = self.make_kernels(y, x)
-        if not 'decoupled' in self.loss:
-            kernels['xy'] = kernels['yx'].transpose(2, 1)
-            kernels['yy'] = self.make_kernels(y, y)
+        if y is not None or self.loss in ['mmd', 'sinkhorn']:
+            kernels['yx'] = self.make_kernel(y, x)
+        if self.loss in ['mmd', 'sinkhorn']:
+            kernels['xy'] = kernels['yx'].transpose(1, 2)
+            kernels['yy'] = self.make_kernel(y, y)
 
         if 'mmd' in self.loss:
-            potentials['xx'] = - kernels['xx'][None, :, :].dot(a)
-            if y is not None or not 'decoupled' in self.loss:
-                potentials['yx'] = - kernels['yx'][None, :, :].dot(a)
+            a = a.exp()
+            b = b.exp()
+            potentials['xx'] = - bmm(kernels['xx'], a) / 2
+            if y is not None or 'loss' == 'mmd':
+                potentials['yx'] = - bmm(kernels['xy'], x) / 2
             if 'decoupled' in self.loss:
                 if y is not None:  # Extrapolate
                     return potentials['xx'], potentials['yx']
                 return potentials['xx']
-            potentials['xy'] = - kernels['xy'][None, :, :].dot(b)
-            potentials['yy'] = - kernels['yy'][None, :, :].dot(b)
-            return (potentials['xy'] - potentials['xx'] / 2,
-                    potentials['yx'] - potentials['yy'] / 2)
+            potentials['xy'] = - bmm(kernels['xy'], b) / 2
+            potentials['yy'] = - bmm(kernels['yy'], b) / 2
+            return (potentials['xy'] - potentials['xx'],
+                    potentials['yx'] - potentials['yy'])
 
-        kernels['xx'] = kernels['xx'] + a[:, None, :]
+        kernels['xx'] = kernels['xx'] / self.epsilon + a[:, None, :].detach()
         potentials = dict(xx=torch.zeros_like(a))
-        running = dict(xx=True)
+        runnings = dict(xx=True)
+
+        if y is not None or not 'decoupled' in self.loss:
+            kernels['yx'] = kernels['yx'] / self.epsilon + a[:, None,
+                                                           :].detach()
 
         if not 'decoupled' in self.loss:
             potentials = dict(xx=potentials['xx'], yx=torch.zeros_like(b),
                               xy=torch.zeros_like(a), yy=torch.zeros_like(b))
-            running = dict(**running, yx=True, xy=True, yy=True)
-            kernels['yx'] = kernels['yx'] + a[:, None, :]
-            kernels['xy'] = kernels['xy'] + b[:, None, :]
-            kernels['yy'] = kernels['yy'] + b[:, None, :]
+            runnings = dict(xx=True, yx=True, xy=True, yy=True)
+            kernels['xy'] = kernels['xy'] / self.epsilon + b[:, None,
+                                                           :].detach()
+            kernels['yy'] = kernels['yy'] / self.epsilon + b[:, None,
+                                                           :].detach()
 
         grad_enabled = torch.is_grad_enabled()
         torch.set_grad_enabled(False)
         n_iter = 0
-        while any(running.values()) and n_iter < self.max_iter:
-            for dir, state in running.items():
+        while any(runnings.values()) and n_iter < self.max_iter:
+            for dir, running in runnings.items():
                 if running:
                     new_potential = - torch.logsumexp(
-                        kernels[dir] + potentials[reversed(dir)][:, None, :],
+                        kernels[dir] + potentials[opp(dir)][:, None, :],
                         dim=2)  # xy -> yx, yx -> xy, xx -> xx, yy -> yy
                     gap = duality_gap(new_potential, potentials[dir])
+                    # print(f'dir {dir} gap {gap}')
                     if gap < self.tol:
-                        running[dir] = False
+                        runnings[dir] = False
                     potentials[dir] *= .5
                     potentials[dir] += .5 * new_potential
             if self.loss == 'sinkhorn':
-                running['xy'] = running['yx'] = running['yx'] or running['xy']
+                runnings['xy'] = runnings['yx'] = runnings['yx'] or runnings[
+                    'xy']
             n_iter += 1
         torch.set_grad_enabled(grad_enabled)
-        for dir in potentials:  # Extrapolation step
-            potentials[dir] = - torch.logsumexp(
-                kernels[dir] + potentials[reversed(dir)][:, None, :], dim=2)
+        if 'decoupled' in self.loss and y is not None:
+            potentials['xy'] = potentials['xx']
+            # so that potentials[opp('yx')] = potentials['xx']
+        potentials_extra = {}
+        for dir in kernels:  # Extrapolation step
+            potentials_extra[dir] = - torch.logsumexp(
+                kernels[dir] + potentials[opp(dir)].detach()[:, None, :],
+                dim=2)
         if 'decoupled' in self.loss:
-            if y is not None:  # Extrapolate
-                potentials['yx'] = - torch.logsumexp(
-                    kernels['yx'] + potentials['xx'][:, None, :], dim=2)
-            return potentials['xx'], potentials['yx']
+            if y is not None:
+                return potentials_extra['xx'], potentials_extra['yx']
+            else:
+                return potentials_extra['xx']
         else:
-            return (potentials['xy'] - potentials['xx'] / 2,
-                    potentials['yx'] - potentials['yy'] / 2)
+            return (potentials_extra['xy'] - potentials_extra['xx'],
+                    potentials_extra['yx'] - potentials_extra['yy'])
 
     def forward(self, x: torch.tensor, a: torch.tensor,
                 y: torch.tensor, b: torch.tensor):
         if 'decoupled' in self.loss:
-            f, g = self.potential(x, a, y)
-            res = torch.sum(g * torch.exp(b) - f * torch.exp(a))
-            if 'asym' in self.loss:
-                return res
-            g, f = self.potential(y, b, x)
-            res = (res + torch.sum(f * torch.exp(a) - g * torch.exp(b))) / 2
+            f, fe = self.potential(x, a, y)
+            g, ge = self.potential(y, b, x)
+            res = torch.sum((ge - f) * a.exp(), dim=1)
+
+            if 'asym' not in self.loss:
+                sym = torch.sum((ge - f) * a.exp(), dim=1)
+                res = (res + sym) / 2
         else:
             f, g = self.potential(x, a, y, b)
-            res = torch.sum(f * a, dim=1) + torch.sum(g * b, dim=2)
+            res = torch.sum(f * a.exp(), dim=1) + torch.sum(g * b.exp(), dim=1)
         return res * self.epsilon
 
 
