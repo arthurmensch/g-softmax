@@ -20,9 +20,9 @@ b = b[None, :]
 y = y[None, :]
 
 distance = MeasureDistance(kernel='energy', loss='sinkhorn',
-                           coupled=False,
-                           distance_type=2, max_iter=1000,
-                           sigma=1, epsilon=1e-5)
+                           coupled=True, verbose=True,
+                           distance_type=2, max_iter=1000, tol=1e-8,
+                           sigma=1, epsilon=1e-4)
 g1 = np.linspace(0, 1, 100)
 g2 = np.linspace(0, 1, 100)
 grid = np.meshgrid(g1, g2)
@@ -30,11 +30,13 @@ grid = np.concatenate((grid[0][:, :, None], grid[1][:, :, None]), axis=2)
 grid = grid.reshape((-1, 2))
 grid = torch.from_numpy(grid).float()[None, :]
 
-f, g = distance.potential(x, a, y, b)
-
-fe = distance.extrapolate(f, x, a, grid)
-ge = distance.extrapolate(g, y, b, grid)
-
+if not distance.coupled:
+    f, fe = distance.potential(x, a, grid)
+    g, ge = distance.potential(y, b, grid)
+else:
+    f, g = distance.potential(x, a, y, b)
+    fe = distance.extrapolate(potential=f, target_pos=grid, pos=x, weight=a)
+    ge = distance.extrapolate(potential=g, target_pos=grid, pos=y, weight=b)
 import matplotlib.pyplot as plt
 fig, axes = plt.subplots(2, 2)
 axes[0, 0].scatter(x[0, :, 0], x[0, :, 1])

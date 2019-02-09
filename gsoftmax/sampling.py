@@ -1,7 +1,4 @@
-from random import choices
-
 import numpy as np
-import torch
 from scipy import misc
 from sklearn.utils import check_random_state
 
