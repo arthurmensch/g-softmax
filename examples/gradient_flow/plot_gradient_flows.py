@@ -6,8 +6,8 @@ from torch.nn import Parameter
 from gsoftmax.continuous import MeasureDistance
 from gsoftmax.sampling import draw_samples, display_samples
 
-n_points = 200
-lr = .1
+n_points = 10
+lr = .01
 time = 5
 
 x, a = draw_samples("data/density_a.png", n_points, random_state=0)
@@ -17,7 +17,7 @@ a = torch.log(a)
 a = a[None, :]
 x = x[None, :]
 
-y, b = draw_samples("data/density_b.png", n_points + 10, random_state=0)
+y, b = draw_samples("data/density_b.png", n_points, random_state=0)
 y = torch.from_numpy(y).float()
 b = torch.from_numpy(b).float()
 b = torch.log(b)
@@ -28,12 +28,12 @@ y = y[None, :]
 sinkhorn_divergence = MeasureDistance(loss='sinkhorn',
                                       coupled=True,
                                       symmetric=True,
-                                      # target_position='left',
+                                      target_position='right',
                                       distance_type=2,
                                       kernel='energy_squared',
-                                      max_iter=100,
+                                      max_iter=1000,
                                       sigma=1,
-                                      verbose=True,
+                                      verbose=False,
                                       epsilon=1e-4)
 
 # Parameters for the gradient descent
@@ -52,7 +52,8 @@ for i in range(n_steps):  # Euler scheme ===============
         x.grad.zero_()
     loss.backward()
     g = x.grad / a.exp()[:, :, None] * lr
-    print(f'{loss.item():.4f}')
+    info = f't = {i / (n_steps - 1) * time:.3f}, loss {loss.item():.4f}'
+    print(info)
 
     if i in display_its:  # display
         ax = plt.subplot(2, 3, k)
@@ -61,7 +62,7 @@ for i in range(n_steps):  # Euler scheme ===============
         display_samples(ax, x[0], [(.95, .55, .55)], g[0],
                         width=.25 / len(x[0]), scale=5)
 
-        ax.set_title(f"t = {i / (n_steps - 1):.3f}")
+        ax.set_title(info)
         ax.axis("equal")
         ax.axis([0, 1, 0, 1])
         plt.xticks([], [])

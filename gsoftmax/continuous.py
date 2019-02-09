@@ -135,7 +135,7 @@ class MeasureDistance(nn.Module):
         if self.coupled:
             kernels['yy'] = self.make_kernel(pos['y'], pos['y'])
             kernels['xy'] = self.make_kernel(pos['x'], pos['y'])
-            kernels['yx'] = kernels['xy'].transpose(2, 1)
+            kernels['yx'] = self.make_kernel(pos['y'], pos['x'])
 
         if self.loss == 'mmd':
             for dir in running:
@@ -210,15 +210,18 @@ class MeasureDistance(nn.Module):
             if self.target_position == 'right' and not self.symmetric:
                 x, a, y, b = y, b, x, a
             f, fe = self.potential(x, a, y)
-            if not self.symmetric:
-                return torch.sum(fe * b.exp(), dim=1)
             g, ge = self.potential(y, b, x)
+            if not self.symmetric:
+                return torch.sum((fe - g) * b.exp(), dim=1)
             left = torch.sum((fe - g) * b.exp(), dim=1)
             right = torch.sum((ge - f) * a.exp(), dim=1)
             return (left + right) / 2
         f, g = self.potential(x, a, y, b)
-        res = torch.sum(f * a.exp(), dim=1) + torch.sum(g * b.exp(), dim=1)
-        return res
+        if not self.symmetric:
+            if self.target_position == 'left':
+                return torch.sum(g * b.exp(), dim=1)
+            return torch.sum(f * a.exp(), dim=1)
+        return torch.sum(f * a.exp(), dim=1) + torch.sum(g * b.exp(), dim=1)
 
 
 class ResLinear(nn.Module):
