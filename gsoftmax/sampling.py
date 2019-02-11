@@ -26,9 +26,9 @@ def draw_samples(fname, n, random_state=None):
     return dots, weights
 
 
-def display_samples(ax, x, color, x_grad=None, scale=None, width=0.0025):
+def display_samples(ax, x, size, color, x_grad=None, scale=None, width=0.0025):
     x_ = x.data.cpu().numpy()
-    ax.scatter(x_[:, 0], x_[:, 1], 9 * 500 / len(x_), color)
+    ax.scatter(x_[:, 0], x_[:, 1], 3000 * size, color)
 
     if x_grad is not None:
         g_ = -x_grad.data.cpu().numpy()

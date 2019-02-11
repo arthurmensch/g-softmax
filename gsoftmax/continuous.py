@@ -122,12 +122,12 @@ class MeasureDistance(nn.Module):
         kernels, potentials, new_potentials = {}, {}, {}
         pos, weights, gaps = {}, {}, {}
 
-        weights['x'], pos['x'] = a.detach(), x
+        weights['x'], pos['x'] = a, x
 
         running = ['xx'] if not self.coupled else ['xx', 'yy', 'xy', 'yx']
 
         if b is not None:
-            weights['y'] = b.detach()
+            weights['y'] = b
         if y is not None:
             pos['y'] = y
 
