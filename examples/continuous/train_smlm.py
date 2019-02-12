@@ -1,8 +1,8 @@
 import torch
-from torch.utils.data import DataLoader
-
+import torch.nn.functional as F
 from gsoftmax.continuous import DeepLoco, MeasureDistance
 from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
+from torch.utils.data import DataLoader
 
 kernel_sigmas = [64.0, 320.0, 640.0, 1920.0]
 
@@ -18,10 +18,11 @@ for fold in ['train', 'eval']:
                                           batch_size=1,
                                           random_state=None)
     loaders[fold] = DataLoader(datasets[fold],
-                               batch_size=2, num_workers=4)
+                               batch_size=2, num_workers=1)
 
 datasets['test'] = SMLMDataset(name='MT0.N1.LD', modality='2D')
-loaders['test'] = DataLoader(datasets[fold], batch_size=256, num_workers=4)
+loaders['test'] = DataLoader(datasets[fold], batch_size=2, num_workers=1,
+                             )
 
 if plot:
     import matplotlib.pyplot as plt
@@ -46,14 +47,15 @@ distance = MeasureDistance(loss='sinkhorn',
                            coupled=False,
                            terms='symmetric',
                            distance_type=2,
-                           kernel='energy',
+                           kernel='energy_squared',
                            max_iter=100,
-                           sigma=1, graph_surgery=False,
+                           sigma=1, graph_surgery='loop',
                            verbose=False,
-                           epsilon=1000)
+                           epsilon=50)
 
 for imgs, positions, weights in loaders['train']:
     weights = torch.log(weights)
+    weights = F.log_softmax(weights, dim=1)
     pred_positions, pred_weights = model(imgs)
     loss = distance(pred_positions, pred_weights, positions, weights)
     print(loss.sum())

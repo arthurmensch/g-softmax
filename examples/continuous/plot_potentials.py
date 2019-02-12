@@ -18,10 +18,10 @@ b = torch.log(b)
 b = b[None, :]
 y = y[None, :]
 
-distance = MeasureDistance(kernel='energy', loss='mmd',
-                           coupled=False, verbose=True,
+distance = MeasureDistance(kernel='energy_squared', loss='sinkhorn',
+                           coupled=True, verbose=True, rho=10,
                            distance_type=2, max_iter=1000, tol=1e-8,
-                           sigma=1, epsilon=10000)
+                           sigma=1, epsilon=1e-3)
 g1 = np.linspace(0, 1, 100)
 g2 = np.linspace(0, 1, 100)
 grid = np.meshgrid(g1, g2)

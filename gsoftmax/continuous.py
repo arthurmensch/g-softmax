@@ -31,10 +31,10 @@ def bmm(x, y):
 
 class MeasureDistance(nn.Module):
     def __init__(self, loss: str = 'sinkhorn', coupled: bool = True,
-                 terms: str = 'symmetric', epsilon: float = 1.,
+                 terms: str = 'symmetric', epsilon: float = 1., rho=None,
                  tol: float = 1e-6, max_iter: int = 10,
                  kernel: str = 'energy_squared', distance_type: int = 2,
-                 graph_surgery: bool = True,
+                 graph_surgery: str = '',
                  sigma: float = 1, verbose: bool = False):
         """
 
@@ -53,6 +53,7 @@ class MeasureDistance(nn.Module):
         self.tol = tol
         self.sigma = sigma
         self.epsilon = epsilon
+        self.rho = rho
 
         self.verbose = verbose
         assert loss in ['sinkhorn', 'mmd']
@@ -146,7 +147,6 @@ class MeasureDistance(nn.Module):
         kernels['xx'] = self.make_kernel(pos['x'], detach(pos['x']))
         if self.coupled or y is not None:
             kernels['yx'] = self.make_kernel(pos['y'], detach(pos['x']))
-
         if self.coupled:
             kernels['yy'] = self.make_kernel(pos['y'], detach(pos['y']))
             kernels['xy'] = self.make_kernel(pos['x'], detach(pos['y']))
@@ -165,11 +165,12 @@ class MeasureDistance(nn.Module):
         for dir in running:
             potentials[dir] = torch.zeros_like(weights[dir[0]])
 
+        scale = 1 if self.rho is None else 1 / (1 + self.epsilon / self.rho)
         n_iter = 0
         with torch.no_grad() if 'loop' in self.graph_surgery else nullcontext():
             while running and n_iter < self.max_iter:
                 for dir in running:
-                    new_potentials[dir] = self.extrapolate(
+                    new_potentials[dir] = scale * self.extrapolate(
                         potential=potentials[dir[::-1]],
                         weight=weights[dir[1]], epsilon=self.epsilon,
                         kernel=kernels[dir])
@@ -189,7 +190,7 @@ class MeasureDistance(nn.Module):
         if not self.coupled and y is not None:
             potentials['xy'] = potentials['xx']
         for dir in kernels:  # Extrapolation step
-            new_potentials[dir] = self.extrapolate(
+            new_potentials[dir] = scale * self.extrapolate(
                 potential=potentials[dir[::-1]],
                 weight=weights[dir[1]],
                 epsilon=self.epsilon,
@@ -216,6 +217,13 @@ class MeasureDistance(nn.Module):
             (kernel + potential[:, None, :]) / epsilon
             + weight[:, None, :], dim=2)
 
+    def potential_diff(self, f, g):
+        if self.rho is None:
+            return f - g
+        else:
+            return - (self.rho + self.epsilon / 2) * (
+                    (- f / self.rho).exp() - (- g / self.rho).exp())
+
     def forward(self, x: torch.tensor, a: torch.tensor,
                 y: torch.tensor, b: torch.tensor):
         if not self.coupled:
@@ -225,9 +233,12 @@ class MeasureDistance(nn.Module):
             f, fe, g, ge = self.potential(x, a, y, b)
         res = 0
         if 'right' in self.terms:
-            res += torch.sum((ge - f) * a.exp(), dim=1)
+            res += torch.sum(self.potential_diff(ge, f) * a.exp(), dim=1)
         if 'left' in self.terms:
-            res += torch.sum((fe - g) * b.exp(), dim=1)
+            res += torch.sum(self.potential_diff(fe, g) * b.exp(), dim=1)
+        if 'symmetric' and self.rho is not None:
+            print(torch.sum(a.exp(), dim=1), torch.sum(b.exp(), dim=1))
+            res += self.epsilon / 2 * (torch.sum(a.exp(), dim=1) - torch.sum(b.exp(), dim=1)) ** 2
         return res
 
 
@@ -295,4 +306,5 @@ class DeepLoco(nn.Module):
         position[:, :, 1] += self.scale['ymin']
         position[:, :, 2] += self.scale['zmin']
         weights = self.weight_fc(x)
+        weights = F.log_softmax(weights, dim=1)
         return position, weights

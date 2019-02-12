@@ -7,9 +7,9 @@ from gsoftmax.continuous import MeasureDistance
 from gsoftmax.sampling import draw_samples, display_samples
 
 n_points = 100
-lr = .01
-t1 = 1
-from_grid = False
+lr = .1
+t1 = 7
+from_grid = True
 
 
 if not from_grid:
@@ -36,15 +36,16 @@ b = b[None, :]
 y = y[None, :]
 
 
-sinkhorn_divergence = MeasureDistance(loss='mmd',
+sinkhorn_divergence = MeasureDistance(loss='sinkhorn',
                                       coupled=True,
                                       terms='symmetric',
                                       distance_type=2,
-                                      kernel='energy',
+                                      kernel='energy_squared',
                                       max_iter=100,
-                                      sigma=1, graph_surgery='',
+                                      rho=None,
+                                      sigma=1, graph_surgery='loop',
                                       verbose=False,
-                                      epsilon=1e-8)
+                                      epsilon=1e-3)
 
 # Parameters for the gradient descent
 n_steps = int(np.ceil(t1 / lr))
@@ -83,4 +84,6 @@ for i, t in enumerate(times):  # Euler scheme ===============
 
     # in-place modification of the tensor's values
     x.data -= g
+    # a.data -= a.grad / a.exp() * lr
+    # print(a)
 plt.show()
