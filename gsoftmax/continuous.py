@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,10 +31,10 @@ def bmm(x, y):
 
 class MeasureDistance(nn.Module):
     def __init__(self, loss: str = 'sinkhorn', coupled: bool = True,
-                 symmetric: bool = True, epsilon: float = 1.,
+                 terms: str = 'symmetric', epsilon: float = 1.,
                  tol: float = 1e-6, max_iter: int = 10,
                  kernel: str = 'energy_squared', distance_type: int = 2,
-                 target_position='right',
+                 graph_surgery: bool = True,
                  sigma: float = 1, verbose: bool = False):
         """
 
@@ -56,8 +58,10 @@ class MeasureDistance(nn.Module):
         assert loss in ['sinkhorn', 'mmd']
         self.loss = loss
         self.coupled = coupled
-        self.symmetric = symmetric
-        self.target_position = target_position
+        assert terms in ['left', 'right', 'symmetric', ['left', 'right'],
+                         ['right', 'left']]
+        self.terms = terms
+        self.graph_surgery = graph_surgery
 
         assert distance_type in [1, 2]
         self.distance_type = distance_type
@@ -79,7 +83,7 @@ class MeasureDistance(nn.Module):
             outer = torch.einsum('bld,bkd->blk', x, y)
             norm_x = torch.sum(x ** 2, dim=2)
             norm_y = torch.sum(y ** 2, dim=2)
-            divider = 1 if self.kernel in ['energy', 'laplacian'] else 2
+            divider = 2 if self.kernel == 'gaussian' else 1
             distance = ((norm_x[:, :, None] + norm_y[:, None, :] - 2 * outer) /
                         (divider * self.sigma ** 2))
             distance.clamp_(min=0.)
@@ -119,40 +123,46 @@ class MeasureDistance(nn.Module):
         :param b: shape(batch_size, k)
         :return:
         """
+
+        def detach(z):
+            return z.detach() if self.graph_surgery else z
+
         kernels, potentials, new_potentials = {}, {}, {}
         pos, weights, gaps = {}, {}, {}
 
-        weights['x'], pos['x'] = a, x
+        weights['x'], pos['x'] = detach(a), x
 
         running = ['xx'] if not self.coupled else ['xx', 'yy', 'xy', 'yx']
 
         if b is not None:
-            weights['y'] = b
+            weights['y'] = detach(b)
         if y is not None:
             pos['y'] = y
 
-        kernels['xx'] = self.make_kernel(pos['x'], pos['x'])
+        kernels['xx'] = self.make_kernel(pos['x'], detach(pos['x']))
+        if self.coupled or y is not None:
+            kernels['yx'] = self.make_kernel(pos['y'], detach(pos['x']))
+
         if self.coupled:
-            kernels['yy'] = self.make_kernel(pos['y'], pos['y'])
-            kernels['xy'] = self.make_kernel(pos['x'], pos['y'])
-            kernels['yx'] = self.make_kernel(pos['y'], pos['x'])
+            kernels['yy'] = self.make_kernel(pos['y'], detach(pos['y']))
+            kernels['xy'] = self.make_kernel(pos['x'], detach(pos['y']))
 
         if self.loss == 'mmd':
-            for dir in running:
+            for dir in kernels:
                 potentials[dir] = self.extrapolate(kernel=kernels[dir],
                                                    weight=weights[dir[1]])
             if not self.coupled:
                 if y is not None:
                     return potentials['xx'], potentials['yx']
                 return potentials['xx']
-            return (potentials['xy'] - potentials['xx'],
-                    potentials['yx'] - potentials['yy'])
+            return (potentials['xx'], potentials['yx'],
+                    potentials['yy'], potentials['xy'])
 
         for dir in running:
             potentials[dir] = torch.zeros_like(weights[dir[0]])
 
         n_iter = 0
-        with torch.no_grad():
+        with torch.no_grad() if self.graph_surgery else nullcontext():
             while running and n_iter < self.max_iter:
                 for dir in running:
                     new_potentials[dir] = self.extrapolate(
@@ -160,7 +170,6 @@ class MeasureDistance(nn.Module):
                         weight=weights[dir[1]], epsilon=self.epsilon,
                         kernel=kernels[dir])
                 for dir in running:
-                    # if dir in ['xx', 'yy']:
                     new_potentials[dir] += potentials[dir]
                     new_potentials[dir] /= 2
                     gaps[dir] = duality_gap(new_potentials[dir],
@@ -175,7 +184,6 @@ class MeasureDistance(nn.Module):
                 n_iter += 1
         if not self.coupled and y is not None:
             potentials['xy'] = potentials['xx']
-            kernels['yx'] = self.make_kernel(pos['y'], pos['x'])
         for dir in kernels:  # Extrapolation step
             new_potentials[dir] = self.extrapolate(
                 potential=potentials[dir[::-1]],
@@ -186,8 +194,8 @@ class MeasureDistance(nn.Module):
             if y is not None:
                 return new_potentials['xx'], new_potentials['yx']
             return new_potentials['xx']
-        return (new_potentials['xy'] - new_potentials['xx'],
-                new_potentials['yx'] - new_potentials['yy'])
+        return (new_potentials['xx'], new_potentials['yx'],
+                new_potentials['yy'], new_potentials['xy'])
 
     def extrapolate(self, potential: torch.tensor = None,
                     weight: torch.tensor = None, kernel: torch.tensor = None,
@@ -206,22 +214,21 @@ class MeasureDistance(nn.Module):
 
     def forward(self, x: torch.tensor, a: torch.tensor,
                 y: torch.tensor, b: torch.tensor):
+        if self.terms == 'symmetric':
+            terms = ['left', 'right']
+        elif self.terms in ['left', 'right']:
+            terms = [self.terms]
         if not self.coupled:
-            if self.target_position == 'right' and not self.symmetric:
-                x, a, y, b = y, b, x, a
             f, fe = self.potential(x, a, y)
             g, ge = self.potential(y, b, x)
-            if not self.symmetric:
-                return torch.sum((fe - g) * b.exp(), dim=1)
-            left = torch.sum((fe - g) * b.exp(), dim=1)
-            right = torch.sum((ge - f) * a.exp(), dim=1)
-            return (left + right) / 2
-        f, g = self.potential(x, a, y, b)
-        if not self.symmetric:
-            if self.target_position == 'left':
-                return torch.sum(g * b.exp(), dim=1)
-            return torch.sum(f * a.exp(), dim=1)
-        return torch.sum(f * a.exp(), dim=1) + torch.sum(g * b.exp(), dim=1)
+        else:
+            f, fe, g, ge = self.potential(x, a, y, b)
+        res = 0
+        if 'right' in terms:
+            res += torch.sum((ge - f) * a.exp(), dim=1)
+        if 'left' in terms:
+            res += torch.sum((fe - g) * b.exp(), dim=1)
+        return res
 
 
 class ResLinear(nn.Module):
@@ -277,6 +284,6 @@ class DeepLoco(nn.Module):
         x = self.conv(x)
         x = x.reshape(-1, 4096)
         x = self.resnet(x)
-        pos = F.tanh(self.pos_fc(x).reshape(-1, 256, 3) * 1000)
+        position = F.tanh(self.pos_fc(x).reshape(-1, 256, 3) * 1000)
         weights = F.log_softmax(self.weight_fc(x), dim=1)
-        return pos, weights
+        return position, weights

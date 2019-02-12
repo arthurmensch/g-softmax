@@ -3,7 +3,7 @@ import os
 import shutil
 import urllib
 import zipfile
-from collections import Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from os.path import expanduser, join
 
 import joblib
@@ -70,6 +70,12 @@ def fetch_smlm_dataset(name='MT0.N1.LD', modality='2D',
                               names=['index', 'frame', 'x', 'y', 'z',
                                      'weight'])
     activations = activations.drop(columns='index')
+    activations = activations.set_index('frame')
+    activations.sort_index(inplace=True)
+
+    positions, weights = zip(*((group.values[:, :3], group.values[:, 3])
+                               for index, group in
+                               activations.groupby(level='frame')))
 
     if name == 'Beads':
         affine = {'resx': 100, 'resy': 100, 'resz': 10,
@@ -78,121 +84,115 @@ def fetch_smlm_dataset(name='MT0.N1.LD', modality='2D',
         affine = {'resx': 100, 'resy': 100, 'resz': 10,
                   'x0': 0, 'y0': 0, 'z0': -750}
 
-    return joblib.load(pkl_file, mmap_mode='r'), affine, activations
+    return joblib.load(pkl_file, mmap_mode='r'), affine, positions, weights
 
 
 class SMLMDataset(Dataset):
-    def __init__(self, name, modality):
-        self.X, _, self.y = fetch_smlm_dataset(name=name, modality=modality)
-        self.y = self.y.reindex(['frame'])
+    def __init__(self, name='MT0.N1.LD', modality='2D', transform=None):
+        self.imgs, self.affine, self.positions, self.weights = fetch_smlm_dataset(
+            name=name, modality=modality)
+
+        self.transform = transform
 
     def __getitem__(self, index):
-        this_y = self.y.loc[index].values
+        positions = torch.from_numpy(self.positions[index])
+        weights = torch.from_numpy(self.weights[index])
+        img = torch.from_numpy(self.imgs[index])
 
-        return (torch.from_numpy(self.X[index]),
-                torch.from_numpy(this_y[:, :3]),
-                torch.from_numpy(this_y[:, 4]))
+        if self.transform is not None:
+            img = self.transform(img)
+
+        return img, positions, weights
 
     def __len__(self):
-        return len(self.X)
+        return len(self.imgs)
 
 
 class ForwardModel(object):
-    def __init__(self, random_state=None):
+    def __init__(self, psf_radius=2700.0, background_noise=100,
+                 name='Beads', modality='2D',
+                 random_state=None):
         """
         Use saved data from a z-stack to generate simulated STORM images
         """
 
+        self.psf_radius = psf_radius
+        self.background_noise = background_noise
         self.random_state = check_random_state(random_state)
-        imgs, _, activations = fetch_smlm_dataset(name='Beads', modality='2D')
-        activations = activations.values
+        imgs, self.affine, positions, weights = fetch_smlm_dataset(name=name,
+                                                                   modality=modality)
+        positions = np.array(positions)
+        weights = np.array(weights)
+        self.offsets = positions[0, :, :2]
+        self.weights = weights[0]
 
-        z_vals = np.linspace(-750, 750, 151)
-        z_stack = [activations[activations[:, 3] == z] for z in
-                   [x for x in z_vals]]
-        imgs = imgs - 100
+        imgs = np.array(imgs) - self.background_noise
+        k, m, n = imgs.shape
 
-        splines = []
-        offsets = []
-        for f_idx in range(151):
-            xs, ys = z_stack[f_idx][:, 1], z_stack[f_idx][:, 2]
-            ### linear approx
-            #### ZERO OUT BOUNDARY....
-            img = imgs[f_idx]
-            img[0, :] = 0.0
-            img[-1, :] = 0.0
-            img[:, 0] = 0.0
-            img[0, -1] = 0.0
-            spline = scipy.interpolate.RectBivariateSpline(
-                [r * 100 for r in range(150)], [r * 100 for r in range(150)],
-                img, kx=1, ky=1)
-            ### The contest z-stack images are improperly normalized.
-            splines.append(spline)
-            xs = np.delete(xs, [1, 5])
-            ys = np.delete(ys, [1, 5])
-            offsets.append((xs, ys))
-        self.splines = splines
-        self.offsets = offsets
+        imgs[:, 0, :] = 0.0
+        imgs[:, -1, :] = 0.0
+        imgs[:, :, 0] = 0.0
+        imgs[:, 0, -1] = 0.0
+        self.splines = [scipy.interpolate.RectBivariateSpline(
+            np.linspace(0, m * self.affine['resx'], m, endpoint=False),
+            np.linspace(0, n * self.affine['resy'], n, endpoint=False),
+            img, kx=1, ky=1) for img in imgs]
 
-    def draw(self, x, y, z, image, w):
+    def draw(self, img, x, y, z, w):
         """
         Render a point source at (x, y, z) nm with weight w
-        onto the passed-in image.
+        onto the passed-in img.
         """
+        m, n = img.shape
 
-        new_pixel_locations = np.linspace(0.0, 6400, 64)
-        z_scaled = (z + 750) / 1500 * 150
-        z_low = int(np.floor(z_scaled))
-        z_high = int(np.ceil(z_scaled))
-        max_dist = 2700.0
-        x_filter = abs(new_pixel_locations - x) < max_dist
-        y_filter = abs(new_pixel_locations - y) < max_dist
-        x_l, x_u = x_filter.nonzero()[0].min(), x_filter.nonzero()[0].max() + 1
-        y_l, y_u = y_filter.nonzero()[0].min(), y_filter.nonzero()[0].max() + 1
+        aff = self.affine
 
-        n_beads = len(self.offsets[z_low][0])
-        p_idx = self.random_state.randint(0, n_beads)
-        spline_l = self.splines[z_low]
-        spline_h = self.splines[z_high]
-        alpha = 1.0 - (z_scaled - z_low)
-        beta = 1.0 - alpha
-        alpha *= w / (30000 * 6.)
-        beta *= w / (30000 * 6.)
-        (xs, ys) = self.offsets[z_low]
-        x_s, y_s = xs[p_idx], ys[p_idx]
+        gridx = np.linspace(0.0, m * self.affine['resx'], m, endpoint=False)
+        gridy = np.linspace(0.0, n * aff['resy'], n, endpoint=False)
 
-        f_y = (new_pixel_locations + (y_s - y))[y_filter]
-        f_x = (new_pixel_locations + (x_s - x))[x_filter]
-        d_image = spline_l(f_y - 100, f_x - 100)
-        image[y_l:y_u, x_l:x_u] += alpha * d_image
+        z_scaled = (z - self.affine['z0']) / self.affine['resz']
+        zl = int(np.floor(z_scaled))
+        zu = int(np.ceil(z_scaled))
 
-        (xs, ys) = self.offsets[z_high]
-        x_s, y_s = xs[p_idx], ys[p_idx]
+        x_mask = abs(gridx - x) < self.psf_radius
+        y_mask = abs(gridy - y) < self.psf_radius
+        x_nnz = x_mask.nonzero()[0]
+        y_nnz = y_mask.nonzero()[0]
+        x_slice = slice(x_nnz.min(), x_nnz.max() + 1)
+        y_slice = slice(y_nnz.min(), y_nnz.max() + 1)
 
-        f_y = (new_pixel_locations + (y_s - y))[y_filter]
-        f_x = (new_pixel_locations + (x_s - x))[x_filter]
-        d_image = spline_h(f_y - 100, f_x - 100)
-        image[y_l:y_u, x_l:x_u] += beta * d_image
-        return image
+        n_beads = len(self.offsets)
+        bead = self.random_state.randint(0, n_beads)
+        xs, ys = self.offsets[bead]
+        weight = self.weights[bead]
 
-    def run_model(self, thetas, weights):
+        alpha = zu - z_scaled
+
+        # For some reason we need this offset
+        fx = (gridx + (xs - x))[x_slice]
+        fy = (gridx + (ys - y))[y_slice]
+        imgl = self.splines[zl](fy, fx)
+        imgu = self.splines[zu](fy, fx)
+        img[y_slice, x_slice] += ((alpha * imgl + (1 - alpha) * imgu)
+                                  * w / weight)
+        return img
+
+    def sample(self, thetas, weights):
         """
         Generate a batch empirically.
         """
-
-        # These are numpy arrays
         batch_size = thetas.shape[0]
-        MAX_N = thetas.shape[1]
-        assert thetas.shape == (batch_size, MAX_N, 3)
-        assert weights.shape == (batch_size, MAX_N)
+        length = thetas.shape[1]
+        assert thetas.shape == (batch_size, length, 3)
+        assert weights.shape == (batch_size, length)
 
-        images = np.zeros((batch_size, 64, 64))
+        imgs = np.zeros((batch_size, 64, 64), dtype=thetas.dtype)
 
-        for b_idx in range(batch_size):
-            for (w, (x, y, z)) in zip(weights[b_idx], thetas[b_idx]):
+        for img, theta, weight in zip(imgs, thetas, weights):
+            for ((x, y, z), w) in zip(theta, weight):
                 if w != 0.0:
-                    self.draw(x, y, z, images[b_idx], w)
-        return images
+                    self.draw(img, x, y, z, w)
+        return imgs
 
 
 class EMCCD(object):
@@ -200,33 +200,34 @@ class EMCCD(object):
     From SMLM Website.
     """
 
-    def __init__(self, noise_background=0.0, quantum_efficiency=0.9,
+    def __init__(self, background_noise=0.0, quantum_efficiency=0.9,
                  read_noise=74.4, spurious_charge=0.0002, em_gain=300.0,
                  baseline=100.0, e_per_adu=45.0,
                  random_state=None):
-        self.qe = quantum_efficiency
+        self.quantum_efficiency = quantum_efficiency
         self.read_noise = read_noise
-        self.c = spurious_charge
+        self.spurious_charge = spurious_charge
         self.em_gain = em_gain
         self.baseline = baseline
         self.e_per_adu = e_per_adu
-        self.noise_bg = noise_background
+        self.background_noise = background_noise
         self.random_state = check_random_state(random_state)
 
     def add_noise(self, photon_counts):
         n_ie = self.random_state.poisson(
-            self.qe * (photon_counts + self.noise_bg) + self.c)
+            self.quantum_efficiency * (photon_counts + self.background_noise) + self.spurious_charge)
         n_oe = self.random_state.gamma(n_ie + 0.001, scale=self.em_gain)
         n_oe = n_oe + self.random_state.normal(0.0, self.read_noise,
                                                n_oe.shape)
-        ADU_out = (n_oe / self.e_per_adu).astype(int) + self.baseline
-        return self.center(np.minimum(ADU_out, 65535))
+        adu_out = (n_oe / self.e_per_adu).astype(int) + self.baseline
+        return self.center(np.minimum(adu_out, 65535))
 
-    def gain(n):
-        return n.qe * n.em_gain / n.e_per_adu
+    def gain(self):
+        return self.quantum_efficiency * self.em_gain / self.e_per_adu
 
-    def mean(n):
-        return (n.noise_bg * n.qe + n.c) * n.em_gain / n.e_per_adu + n.baseline
+    def mean(self):
+        return (self.background_noise * self.quantum_efficiency + self.spurious_charge) * self.em_gain / \
+               self.e_per_adu + self.baseline
 
     def center(self, img):
         return (img - self.mean()) / self.gain()
@@ -253,48 +254,37 @@ class UniformCardinalityPrior(object):
         return thetas, weights
 
 
-class GenerativeModelIter(Iterator):
-    def __init__(self, generative_model):
-        self.generative_model = generative_model
-        self.n_iter = 0
-        self.max_iter = generative_model.max_iter
-
-    def __next__(self):
-        self.n_iter += 1
-        if self.n_iter > self.max_iter:
-            raise StopIteration
-        return self.generative_model.sample()
-
-
-class GenerativeModel(Iterable):
-    def __init__(self, parameter_prior, forward_model, noise_model,
-                 batch_size=256, max_iter=100):
-        self.parameter_prior = parameter_prior
-        self.forward_model = forward_model
-        self.noise_model = noise_model
+class SyntheticSMLMDataset(Dataset):
+    def __init__(self, n_beads=3, noise=100, batch_size=256,
+                 length=100, random_state=None, ):
+        self.parameter_prior = UniformCardinalityPrior(
+            n_beads, random_state=random_state)
+        self.forward_model = ForwardModel(background_noise=noise,
+                                          random_state=random_state)
+        self.affine = self.forward_model.affine
+        self.noise_model = EMCCD(background_noise=noise,
+                                 random_state=random_state)
 
         self.batch_size = batch_size
-        self.max_iter = max_iter
+        self.length = length
 
-    def __iter__(self):
-        return GenerativeModelIter(self)
+    def __getitem__(self, i):
+        images, positions, weights = self.sample()
+        if self.batch_size == 1:
+            return images[0], positions[0], weights[0]
+        else:
+            return images, positions, weights
 
-    def sample(self):
-        positions, weights = self.parameter_prior.sample(self.batch_size)
-        noiseless = self.forward_model.run_model(positions, weights)
+    def __len__(self):
+        return self.length
+
+    def sample(self, batch_size=None):
+        if batch_size is None:
+            batch_size = self.batch_size
+        positions, weights = self.parameter_prior.sample(batch_size)
         positions = positions.astype('float32')
         weights = weights.astype('float32')
+        noiseless = self.forward_model.sample(positions, weights)
         images = self.noise_model.add_noise(noiseless).astype('float32')
         return (torch.from_numpy(images), torch.from_numpy(positions),
                 torch.from_numpy(weights))
-
-
-def make_generative_model(n_beads=3, noise=100, batch_size=8,
-                          max_iter=100, random_state=None):
-    return GenerativeModel(UniformCardinalityPrior(n_beads,
-                                                   random_state=random_state),
-                           ForwardModel(random_state=random_state),
-                           EMCCD(noise_background=noise,
-                                 random_state=random_state),
-                           batch_size=batch_size,
-                           max_iter=max_iter)
