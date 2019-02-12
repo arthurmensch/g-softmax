@@ -8,12 +8,12 @@ from gsoftmax.sampling import draw_samples, display_samples
 
 n_points = 100
 lr = .01
-t1 = 3
+t1 = 1
 from_grid = False
 
 
 if not from_grid:
-    x, a = draw_samples("data/density_a.png", 100, random_state=0)
+    x, a = draw_samples("data/density_a.png", 190, random_state=0)
 else:
     g1 = np.linspace(0, 1, 20)
     g2 = np.linspace(0, 1, 20)
@@ -28,7 +28,7 @@ a = torch.log(a)
 a = a[None, :]
 x = x[None, :]
 
-y, b = draw_samples("data/density_b.png", 100, random_state=0)
+y, b = draw_samples("data/density_b.png", 200, random_state=0)
 y = torch.from_numpy(y).float()
 b = torch.from_numpy(b).float()
 b = torch.log(b)
@@ -36,15 +36,15 @@ b = b[None, :]
 y = y[None, :]
 
 
-sinkhorn_divergence = MeasureDistance(loss='sinkhorn',
-                                      coupled=False,
-                                      terms='left',
+sinkhorn_divergence = MeasureDistance(loss='mmd',
+                                      coupled=True,
+                                      terms='symmetric',
                                       distance_type=2,
                                       kernel='energy',
                                       max_iter=100,
-                                      sigma=1, graph_surgery=False,
+                                      sigma=1, graph_surgery='',
                                       verbose=False,
-                                      epsilon=1e-4)
+                                      epsilon=1e-8)
 
 # Parameters for the gradient descent
 n_steps = int(np.ceil(t1 / lr))
@@ -70,7 +70,8 @@ for i, t in enumerate(times):  # Euler scheme ===============
         ax = plt.subplot(2, 3, k)
         k = k + 1
         display_samples(ax, y[0], b.exp()[0], [(.55, .55, .95)])
-        display_samples(ax, x.detach()[0], a.detach().exp()[0], [(.95, .55, .55)], g[0],
+        display_samples(ax, x.detach()[0], a.detach().exp()[0],
+                        [(.95, .55, .55)], g[0],
                         width=.25 / len(x[0]), scale=5)
 
         ax.set_title(info)

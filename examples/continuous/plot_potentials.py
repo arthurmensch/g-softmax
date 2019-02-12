@@ -6,7 +6,6 @@ from gsoftmax.continuous import MeasureDistance
 
 x, a = draw_samples("data/density_b.png", 200, random_state=0)
 x = torch.from_numpy(x).float()
-x[:, 0] -= .2
 a = torch.from_numpy(a).float()
 a = torch.log(a)
 a = a[None, :]
@@ -19,10 +18,10 @@ b = torch.log(b)
 b = b[None, :]
 y = y[None, :]
 
-distance = MeasureDistance(kernel='energy', loss='sinkhorn',
-                           coupled=True, verbose=True,
+distance = MeasureDistance(kernel='energy', loss='mmd',
+                           coupled=False, verbose=True,
                            distance_type=2, max_iter=1000, tol=1e-8,
-                           sigma=1, epsilon=1e-4)
+                           sigma=1, epsilon=10000)
 g1 = np.linspace(0, 1, 100)
 g2 = np.linspace(0, 1, 100)
 grid = np.meshgrid(g1, g2)
@@ -34,7 +33,7 @@ if not distance.coupled:
     f, fe = distance.potential(x, a, grid)
     g, ge = distance.potential(y, b, grid)
 else:
-    f, g = distance.potential(x, a, y, b)
+    fs, g, gs, f = distance.potential(x, a, y, b)
     fe = distance.extrapolate(potential=f, target_pos=grid, pos=x, weight=a)
     ge = distance.extrapolate(potential=g, target_pos=grid, pos=y, weight=b)
 import matplotlib.pyplot as plt

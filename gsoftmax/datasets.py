@@ -102,7 +102,7 @@ class SMLMDataset(Dataset):
         if self.transform is not None:
             img = self.transform(img)
 
-        return img, positions, weights
+        return img[None, :], positions, weights
 
     def __len__(self):
         return len(self.imgs)
@@ -271,9 +271,9 @@ class SyntheticSMLMDataset(Dataset):
     def __getitem__(self, i):
         images, positions, weights = self.sample()
         if self.batch_size == 1:
-            return images[0], positions[0], weights[0]
+            return images[0][None, :], positions[0], weights[0]
         else:
-            return images, positions, weights
+            return images[:, None], positions, weights
 
     def __len__(self):
         return self.length

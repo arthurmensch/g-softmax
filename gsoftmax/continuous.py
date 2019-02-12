@@ -60,6 +60,10 @@ class MeasureDistance(nn.Module):
         self.coupled = coupled
         assert terms in ['left', 'right', 'symmetric', ['left', 'right'],
                          ['right', 'left']]
+        if terms == 'symmetric':
+            terms = ['left', 'right']
+        elif terms in ['left', 'right']:
+            terms = [terms]
         self.terms = terms
         self.graph_surgery = graph_surgery
 
@@ -125,17 +129,17 @@ class MeasureDistance(nn.Module):
         """
 
         def detach(z):
-            return z.detach() if self.graph_surgery else z
+            return z.detach() if 'pos' in self.graph_surgery else z
 
         kernels, potentials, new_potentials = {}, {}, {}
         pos, weights, gaps = {}, {}, {}
 
-        weights['x'], pos['x'] = detach(a), x
+        weights['x'], pos['x'] = a.detach(), x
 
         running = ['xx'] if not self.coupled else ['xx', 'yy', 'xy', 'yx']
 
         if b is not None:
-            weights['y'] = detach(b)
+            weights['y'] = b.detach()
         if y is not None:
             pos['y'] = y
 
@@ -162,7 +166,7 @@ class MeasureDistance(nn.Module):
             potentials[dir] = torch.zeros_like(weights[dir[0]])
 
         n_iter = 0
-        with torch.no_grad() if self.graph_surgery else nullcontext():
+        with torch.no_grad() if 'loop' in self.graph_surgery else nullcontext():
             while running and n_iter < self.max_iter:
                 for dir in running:
                     new_potentials[dir] = self.extrapolate(
@@ -214,19 +218,15 @@ class MeasureDistance(nn.Module):
 
     def forward(self, x: torch.tensor, a: torch.tensor,
                 y: torch.tensor, b: torch.tensor):
-        if self.terms == 'symmetric':
-            terms = ['left', 'right']
-        elif self.terms in ['left', 'right']:
-            terms = [self.terms]
         if not self.coupled:
             f, fe = self.potential(x, a, y)
             g, ge = self.potential(y, b, x)
         else:
             f, fe, g, ge = self.potential(x, a, y, b)
         res = 0
-        if 'right' in terms:
+        if 'right' in self.terms:
             res += torch.sum((ge - f) * a.exp(), dim=1)
-        if 'left' in terms:
+        if 'left' in self.terms:
             res += torch.sum((fe - g) * b.exp(), dim=1)
         return res
 
@@ -244,7 +244,7 @@ class ResLinear(nn.Module):
 
 
 class DeepLoco(nn.Module):
-    def __init__(self):
+    def __init__(self, scale, beads=10):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(1, 16, 5, padding=2),
@@ -280,10 +280,19 @@ class DeepLoco(nn.Module):
         self.weight_fc = nn.Linear(2048, 256)
         self.pos_fc = nn.Linear(2048, 256 * 3)
 
+        self.beads = beads
+        self.scale = scale
+
     def forward(self, x):
         x = self.conv(x)
         x = x.reshape(-1, 4096)
         x = self.resnet(x)
-        position = F.tanh(self.pos_fc(x).reshape(-1, 256, 3) * 1000)
-        weights = F.log_softmax(self.weight_fc(x), dim=1)
+        position = torch.sigmoid(self.pos_fc(x).reshape(-1, 256, 3))
+        position[:, :, 0] *= self.scale['xmax'] - self.scale['xmin']
+        position[:, :, 1] *= self.scale['ymax'] - self.scale['ymin']
+        position[:, :, 2] *= self.scale['zmax'] - self.scale['zmin']
+        position[:, :, 0] += self.scale['xmin']
+        position[:, :, 1] += self.scale['ymin']
+        position[:, :, 2] += self.scale['zmin']
+        weights = self.weight_fc(x)
         return position, weights
