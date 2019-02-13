@@ -89,13 +89,22 @@ def fetch_smlm_dataset(name='MT0.N1.LD', modality='2D',
 
 class SMLMDataset(Dataset):
     def __init__(self, name='MT0.N1.LD', modality='2D', transform=None):
-        self.imgs, self.affine, self.positions, self.weights = fetch_smlm_dataset(
+        self.imgs, affine, self.positions, self.weights = fetch_smlm_dataset(
             name=name, modality=modality)
+        k, m, n = self.imgs.shape
+
+        self.offset = np.array([affine['x0'], affine['y0'],
+                           affine['z0']])
+        self.scale = np.array([affine['resx'] * k, affine['resy'] * m,
+                          affine['resz'] * n])
 
         self.transform = transform
 
     def __getitem__(self, index):
         positions = torch.from_numpy(self.positions[index])
+        positions -= self.offset[None, :]
+        positions /= self.scale[None, :]
+
         weights = torch.from_numpy(self.weights[index])
         img = torch.from_numpy(self.imgs[index])
 
@@ -110,7 +119,7 @@ class SMLMDataset(Dataset):
 
 class ForwardModel(object):
     def __init__(self, psf_radius=2700.0, background_noise=100,
-                 name='Beads', modality='2D',
+                 modality='2D',
                  random_state=None):
         """
         Use saved data from a z-stack to generate simulated STORM images
@@ -119,7 +128,7 @@ class ForwardModel(object):
         self.psf_radius = psf_radius
         self.background_noise = background_noise
         self.random_state = check_random_state(random_state)
-        imgs, self.affine, positions, weights = fetch_smlm_dataset(name=name,
+        imgs, self.affine, positions, weights = fetch_smlm_dataset(name='Beads',
                                                                    modality=modality)
         positions = np.array(positions)
         weights = np.array(weights)
@@ -215,7 +224,8 @@ class EMCCD(object):
 
     def add_noise(self, photon_counts):
         n_ie = self.random_state.poisson(
-            self.quantum_efficiency * (photon_counts + self.background_noise) + self.spurious_charge)
+            self.quantum_efficiency * (
+                        photon_counts + self.background_noise) + self.spurious_charge)
         n_oe = self.random_state.gamma(n_ie + 0.001, scale=self.em_gain)
         n_oe = n_oe + self.random_state.normal(0.0, self.read_noise,
                                                n_oe.shape)
@@ -226,7 +236,8 @@ class EMCCD(object):
         return self.quantum_efficiency * self.em_gain / self.e_per_adu
 
     def mean(self):
-        return (self.background_noise * self.quantum_efficiency + self.spurious_charge) * self.em_gain / \
+        return (
+                           self.background_noise * self.quantum_efficiency + self.spurious_charge) * self.em_gain / \
                self.e_per_adu + self.baseline
 
     def center(self, img):
@@ -256,12 +267,15 @@ class UniformCardinalityPrior(object):
 
 class SyntheticSMLMDataset(Dataset):
     def __init__(self, n_beads=3, noise=100, batch_size=256,
-                 length=100, random_state=None, ):
+                 length=100, random_state=None, modality='2D'):
         self.parameter_prior = UniformCardinalityPrior(
             n_beads, random_state=random_state)
+        self.offset = torch.tensor([0., 0., -750.])
+        self.scale = torch.tensor([6400., 6400., 1500.])
         self.forward_model = ForwardModel(background_noise=noise,
+                                          modality=modality,
                                           random_state=random_state)
-        self.affine = self.forward_model.affine
+
         self.noise_model = EMCCD(background_noise=noise,
                                  random_state=random_state)
 
@@ -270,6 +284,8 @@ class SyntheticSMLMDataset(Dataset):
 
     def __getitem__(self, i):
         images, positions, weights = self.sample()
+        positions -= self.offset[None, :]
+        positions /= self.scale[None, :]
         if self.batch_size == 1:
             return images[0][None, :], positions[0], weights[0]
         else:

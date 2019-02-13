@@ -9,11 +9,12 @@ from gsoftmax.sampling import draw_samples, display_samples
 n_points = 100
 lr = .1
 t1 = 7
-from_grid = True
+from_grid = False
 
 
 if not from_grid:
     x, a = draw_samples("data/density_a.png", 190, random_state=0)
+    a *= 2
 else:
     g1 = np.linspace(0, 1, 20)
     g2 = np.linspace(0, 1, 20)
@@ -37,12 +38,12 @@ y = y[None, :]
 
 
 sinkhorn_divergence = MeasureDistance(loss='sinkhorn',
-                                      coupled=True,
+                                      coupled=False,
                                       terms='symmetric',
                                       distance_type=2,
                                       kernel='energy_squared',
                                       max_iter=100,
-                                      rho=None,
+                                      rho=1e-4,
                                       sigma=1, graph_surgery='loop',
                                       verbose=False,
                                       epsilon=1e-3)
@@ -65,7 +66,6 @@ for i, t in enumerate(times):  # Euler scheme ===============
     loss.backward()
     g = x.grad / a.exp()[:, :, None] * lr
     info = f't = {t:.3f}, loss {loss.item():.4f}'
-    print(info)
 
     if i in display_its:  # display
         ax = plt.subplot(2, 3, k)

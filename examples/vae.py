@@ -7,8 +7,6 @@ import torch.utils.data
 
 from sacred import SETTINGS
 
-SETTINGS.HOST_INFO.INCLUDE_GPU_INFO = False  # equivalent
-
 from sacred import Experiment
 from sacred.observers import FileStorageObserver
 from torch import nn, optim

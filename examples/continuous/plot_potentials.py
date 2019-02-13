@@ -19,7 +19,7 @@ b = b[None, :]
 y = y[None, :]
 
 distance = MeasureDistance(kernel='energy_squared', loss='sinkhorn',
-                           coupled=True, verbose=True, rho=10,
+                           coupled=False, verbose=True, rho=1e-4,
                            distance_type=2, max_iter=1000, tol=1e-8,
                            sigma=1, epsilon=1e-3)
 g1 = np.linspace(0, 1, 100)

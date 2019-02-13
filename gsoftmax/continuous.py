@@ -34,7 +34,7 @@ class MeasureDistance(nn.Module):
                  terms: str = 'symmetric', epsilon: float = 1., rho=None,
                  tol: float = 1e-6, max_iter: int = 10,
                  kernel: str = 'energy_squared', distance_type: int = 2,
-                 graph_surgery: str = '',
+                 graph_surgery: str = 'loop',
                  sigma: float = 1, verbose: bool = False):
         """
 
@@ -129,27 +129,30 @@ class MeasureDistance(nn.Module):
         :return:
         """
 
-        def detach(z):
+        def detach_pos(z):
             return z.detach() if 'pos' in self.graph_surgery else z
+
+        def detach_weight(z):
+            return z.detach() if 'weight' in self.graph_surgery else z
 
         kernels, potentials, new_potentials = {}, {}, {}
         pos, weights, gaps = {}, {}, {}
 
-        weights['x'], pos['x'] = a.detach(), x
+        weights['x'], pos['x'] = detach_weight(a), x
 
         running = ['xx'] if not self.coupled else ['xx', 'yy', 'xy', 'yx']
 
         if b is not None:
-            weights['y'] = b.detach()
+            weights['y'] = b
         if y is not None:
             pos['y'] = y
 
-        kernels['xx'] = self.make_kernel(pos['x'], detach(pos['x']))
+        kernels['xx'] = self.make_kernel(pos['x'], detach_pos(pos['x']))
         if self.coupled or y is not None:
-            kernels['yx'] = self.make_kernel(pos['y'], detach(pos['x']))
+            kernels['yx'] = self.make_kernel(pos['y'], detach_pos(pos['x']))
         if self.coupled:
-            kernels['yy'] = self.make_kernel(pos['y'], detach(pos['y']))
-            kernels['xy'] = self.make_kernel(pos['x'], detach(pos['y']))
+            kernels['yy'] = self.make_kernel(pos['y'], detach_pos(pos['y']))
+            kernels['xy'] = self.make_kernel(pos['x'], detach_pos(pos['y']))
 
         if self.loss == 'mmd':
             for dir in kernels:
@@ -165,12 +168,11 @@ class MeasureDistance(nn.Module):
         for dir in running:
             potentials[dir] = torch.zeros_like(weights[dir[0]])
 
-        scale = 1 if self.rho is None else 1 / (1 + self.epsilon / self.rho)
         n_iter = 0
         with torch.no_grad() if 'loop' in self.graph_surgery else nullcontext():
             while running and n_iter < self.max_iter:
                 for dir in running:
-                    new_potentials[dir] = scale * self.extrapolate(
+                    new_potentials[dir] = self.extrapolate(
                         potential=potentials[dir[::-1]],
                         weight=weights[dir[1]], epsilon=self.epsilon,
                         kernel=kernels[dir])
@@ -190,11 +192,13 @@ class MeasureDistance(nn.Module):
         if not self.coupled and y is not None:
             potentials['xy'] = potentials['xx']
         for dir in kernels:  # Extrapolation step
-            new_potentials[dir] = scale * self.extrapolate(
+            new_potentials[dir] = self.extrapolate(
                 potential=potentials[dir[::-1]],
                 weight=weights[dir[1]],
                 epsilon=self.epsilon,
                 kernel=kernels[dir])
+        new_potentials = {dir: self.potential_transform(potential)
+                          for dir, potential in new_potentials.items()}
         if not self.coupled:
             if y is not None:
                 return new_potentials['xx'], new_potentials['yx']
@@ -212,33 +216,32 @@ class MeasureDistance(nn.Module):
             return - bmm(kernel, weight.exp()) / 2
         if epsilon is None:
             epsilon = self.epsilon
-
-        return - epsilon * torch.logsumexp(
+        scale = 1 if self.rho is None else 1 / (1 + self.epsilon / self.rho)
+        return - epsilon * scale * torch.logsumexp(
             (kernel + potential[:, None, :]) / epsilon
             + weight[:, None, :], dim=2)
 
-    def potential_diff(self, f, g):
-        if self.rho is None:
-            return f - g
+    def potential_transform(self, f):
+        if self.rho is None or self.loss == 'mmd':
+            return f
         else:
-            return - (self.rho + self.epsilon / 2) * (
-                    (- f / self.rho).exp() - (- g / self.rho).exp())
+            # scale * rho
+            return - (self.rho + self.epsilon / 2) * (- f / self.rho).exp()
 
     def forward(self, x: torch.tensor, a: torch.tensor,
                 y: torch.tensor, b: torch.tensor):
+
         if not self.coupled:
             f, fe = self.potential(x, a, y)
             g, ge = self.potential(y, b, x)
         else:
             f, fe, g, ge = self.potential(x, a, y, b)
         res = 0
+        print(f, fe, g, ge)
         if 'right' in self.terms:
-            res += torch.sum(self.potential_diff(ge, f) * a.exp(), dim=1)
+            res += torch.sum((ge - f) * a.exp(), dim=1)
         if 'left' in self.terms:
-            res += torch.sum(self.potential_diff(fe, g) * b.exp(), dim=1)
-        if 'symmetric' and self.rho is not None:
-            print(torch.sum(a.exp(), dim=1), torch.sum(b.exp(), dim=1))
-            res += self.epsilon / 2 * (torch.sum(a.exp(), dim=1) - torch.sum(b.exp(), dim=1)) ** 2
+            res += torch.sum((fe - g) * b.exp(), dim=1)
         return res
 
 
@@ -255,7 +258,7 @@ class ResLinear(nn.Module):
 
 
 class DeepLoco(nn.Module):
-    def __init__(self, scale, beads=10):
+    def __init__(self, beads=10):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(1, 16, 5, padding=2),
@@ -288,23 +291,15 @@ class DeepLoco(nn.Module):
             nn.ReLU(True),
         )
 
-        self.weight_fc = nn.Linear(2048, 256)
-        self.pos_fc = nn.Linear(2048, 256 * 3)
+        self.weight_fc = nn.Linear(2048, beads)
+        self.pos_fc = nn.Linear(2048, beads * 3)
 
         self.beads = beads
-        self.scale = scale
 
     def forward(self, x):
         x = self.conv(x)
         x = x.reshape(-1, 4096)
         x = self.resnet(x)
-        position = torch.sigmoid(self.pos_fc(x).reshape(-1, 256, 3))
-        position[:, :, 0] *= self.scale['xmax'] - self.scale['xmin']
-        position[:, :, 1] *= self.scale['ymax'] - self.scale['ymin']
-        position[:, :, 2] *= self.scale['zmax'] - self.scale['zmin']
-        position[:, :, 0] += self.scale['xmin']
-        position[:, :, 1] += self.scale['ymin']
-        position[:, :, 2] += self.scale['zmin']
+        position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads, 3))
         weights = self.weight_fc(x)
-        weights = F.log_softmax(weights, dim=1)
         return position, weights
