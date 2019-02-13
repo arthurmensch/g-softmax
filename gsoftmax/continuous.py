@@ -1,8 +1,10 @@
+import math
 from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn import ModuleList
 
 
 def duality_gap(potential, new_potential):
@@ -35,7 +37,8 @@ class MeasureDistance(nn.Module):
                  tol: float = 1e-6, max_iter: int = 10,
                  kernel: str = 'energy_squared', distance_type: int = 2,
                  graph_surgery: str = 'loop',
-                 sigma: float = 1, verbose: bool = False):
+                 sigma: float = 1, verbose: bool = False,
+                 reduction='mean'):
         """
 
         :param max_iter:
@@ -77,6 +80,9 @@ class MeasureDistance(nn.Module):
             assert kernel in ['energy', 'laplacian']
         self.kernel = kernel
 
+        assert reduction in ['none', 'mean', 'sum']
+        self.reduction = reduction
+
     def make_kernel(self, x: torch.tensor, y: torch.tensor):
         """
 
@@ -99,7 +105,8 @@ class MeasureDistance(nn.Module):
             if self.kernel in ['energy', 'energy_squared']:
                 return distance
             elif self.kernel in ['laplacian', 'gaussian']:
-                return torch.exp(distance)
+                multiplier = 2 if self.kernel == 'laplacian' else math.sqrt(2 * math.pi)
+                return torch.exp(distance) / multiplier / self.sigma
             raise ValueError(f'Wrong kernel argument for'
                              f' distance_type==2, got `{self.kernel}`')
         elif self.distance_type == 1:
@@ -117,9 +124,7 @@ class MeasureDistance(nn.Module):
                              f'got `{self.distance_type}`')
 
     def potential(self, x: torch.tensor, a: torch.tensor,
-                  y: torch.tensor = None,
-                  b: torch.tensor = None,
-                  ):
+                  y: torch.tensor = None, b: torch.tensor = None,):
         """
 
         :param x: shape(batch_size, l, d)
@@ -143,7 +148,7 @@ class MeasureDistance(nn.Module):
         running = ['xx'] if not self.coupled else ['xx', 'yy', 'xy', 'yx']
 
         if b is not None:
-            weights['y'] = b
+            weights['y'] = detach_weight(b)
         if y is not None:
             pos['y'] = y
 
@@ -164,6 +169,8 @@ class MeasureDistance(nn.Module):
                 return potentials['xx']
             return (potentials['xx'], potentials['yx'],
                     potentials['yy'], potentials['xy'])
+
+        weights = {dir: torch.log(weight) for dir, weight in weights.items()}
 
         for dir in running:
             potentials[dir] = torch.zeros_like(weights[dir[0]])
@@ -213,7 +220,7 @@ class MeasureDistance(nn.Module):
         if kernel is None:
             kernel = self.make_kernel(target_pos, pos)
         if self.loss == 'mmd':
-            return - bmm(kernel, weight.exp()) / 2
+            return - bmm(kernel, weight) / 2
         if epsilon is None:
             epsilon = self.epsilon
         scale = 1 if self.rho is None else 1 / (1 + self.epsilon / self.rho)
@@ -237,11 +244,19 @@ class MeasureDistance(nn.Module):
         else:
             f, fe, g, ge = self.potential(x, a, y, b)
         res = 0
-        print(f, fe, g, ge)
         if 'right' in self.terms:
-            res += torch.sum((ge - f) * a.exp(), dim=1)
+            diff = ge - f
+            diff[a == 0] = 0
+            res += torch.sum(diff * a, dim=1)
         if 'left' in self.terms:
-            res += torch.sum((fe - g) * b.exp(), dim=1)
+            diff = fe - g
+            diff[b == 0] = 0
+            res += torch.sum(diff * b, dim=1)
+
+        if self.reduction == 'mean':
+            res = res.mean()
+        elif self.reduction == 'sum':
+            res = res.sum()
         return res
 
 
@@ -262,33 +277,38 @@ class DeepLoco(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(1, 16, 5, padding=2),
-            nn.BatchNorm2d(16),
+            # nn.BatchNorm2d(16),
             nn.Conv2d(16, 16, 5, padding=2),
-            nn.BatchNorm2d(16),
+            # nn.BatchNorm2d(16),
             nn.Conv2d(16, 64, 2, stride=2),
-            nn.BatchNorm2d(64),
+            # nn.BatchNorm2d(64),
             nn.ReLU(True),
             nn.Conv2d(64, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
+            # nn.BatchNorm2d(64),
             nn.ReLU(True),
             nn.Conv2d(64, 256, 2, stride=2),
-            nn.BatchNorm2d(256),
+            # nn.BatchNorm2d(256),
             nn.ReLU(True),
             nn.Conv2d(256, 256, 3, padding=1),
-            nn.BatchNorm2d(256),
+            # nn.BatchNorm2d(256),
             nn.ReLU(True),
             nn.Conv2d(256, 256, 3, padding=1),
-            nn.BatchNorm2d(256),
+            # nn.BatchNorm2d(256),
             nn.ReLU(True),
             nn.Conv2d(256, 256, 4, stride=4),
-            nn.BatchNorm2d(256),
+            # nn.BatchNorm2d(256),
             nn.ReLU(True),
         )
 
         self.resnet = nn.Sequential(
             nn.Linear(4096, 2048),
-            nn.BatchNorm1d(2048),
+            # nn.BatchNorm1d(2048),
             nn.ReLU(True),
+            nn.Linear(2048, 2048),
+            nn.ReLU(True),
+            nn.Linear(2048, 2048),
+            nn.ReLU(True),
+            nn.Linear(2048, 2048),
         )
 
         self.weight_fc = nn.Linear(2048, beads)
@@ -302,4 +322,5 @@ class DeepLoco(nn.Module):
         x = self.resnet(x)
         position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads, 3))
         weights = self.weight_fc(x)
+        weights = F.relu(weights)
         return position, weights

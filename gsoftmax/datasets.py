@@ -3,7 +3,6 @@ import os
 import shutil
 import urllib
 import zipfile
-from collections.abc import Iterable, Iterator
 from os.path import expanduser, join
 
 import joblib
@@ -12,7 +11,6 @@ import pandas as pd
 import scipy.interpolate
 import torch
 from PIL import Image
-from sklearn.utils import check_random_state
 from torch.utils.data import Dataset
 
 
@@ -70,48 +68,65 @@ def fetch_smlm_dataset(name='MT0.N1.LD', modality='2D',
                               names=['index', 'frame', 'x', 'y', 'z',
                                      'weight'])
     activations = activations.drop(columns='index')
+    # Numbered from 1
+    activations['frame'] = activations['frame'].astype(np.int64) - 1
     activations = activations.set_index('frame')
     activations.sort_index(inplace=True)
 
-    positions, weights = zip(*((group.values[:, :3], group.values[:, 3])
-                               for index, group in
-                               activations.groupby(level='frame')))
+    max_n_beads = int(
+        activations['x'].groupby(level='frame').aggregate('count').max())
 
     if name == 'Beads':
-        affine = {'resx': 100, 'resy': 100, 'resz': 10,
-                  'x0': 0, 'y0': 0, 'z0': -750}
+        affine = {'resx': 100, 'resy': 100., 'resz': 10,
+                  'x0': 0, 'y0': 0, 'z0': -750.}
     else:
-        affine = {'resx': 100, 'resy': 100, 'resz': 10,
-                  'x0': 0, 'y0': 0, 'z0': -750}
+        affine = {'resx': 100, 'resy': 100., 'resz': 10,
+                  'x0': 0, 'y0': 0, 'z0': -750.}
 
-    return joblib.load(pkl_file, mmap_mode='r'), affine, positions, weights
+    return (joblib.load(pkl_file, mmap_mode='r'), affine,
+            activations, max_n_beads)
 
 
 class SMLMDataset(Dataset):
-    def __init__(self, name='MT0.N1.LD', modality='2D', transform=None):
-        self.imgs, affine, self.positions, self.weights = fetch_smlm_dataset(
-            name=name, modality=modality)
+    def __init__(self, name='MT0.N1.LD', modality='2D', dimension=3,
+                 transform=None, return_activation=True):
+        self.imgs, affine, self.activations, self.max_n_beads = \
+            fetch_smlm_dataset(name=name, modality=modality)
         k, m, n = self.imgs.shape
 
-        self.offset = np.array([affine['x0'], affine['y0'],
-                           affine['z0']])
-        self.scale = np.array([affine['resx'] * k, affine['resy'] * m,
-                          affine['resz'] * n])
+        self.offset = torch.tensor([0., 0., -750.])
+        self.scale = torch.tensor([6400., 6400., 1500.])
 
         self.transform = transform
+        self.return_activation = return_activation
+
+        assert dimension in [2, 3]
+        self.dimension = dimension
 
     def __getitem__(self, index):
-        positions = torch.from_numpy(self.positions[index])
-        positions -= self.offset[None, :]
-        positions /= self.scale[None, :]
-
-        weights = torch.from_numpy(self.weights[index])
-        img = torch.from_numpy(self.imgs[index])
+        img = torch.from_numpy(self.imgs[index])[None, :]
 
         if self.transform is not None:
             img = self.transform(img)
 
-        return img[None, :], positions, weights
+        positions = torch.zeros((self.max_n_beads, self.dimension))
+        weights = torch.zeros((self.max_n_beads,))
+        try:
+            activation = torch.from_numpy(self.activations.loc[index].values)
+            if len(activation.shape) == 1:
+                activation = activation[None, :]
+        except KeyError:
+            pass
+        else:
+            i = len(activation)
+            positions[-i:] = activation[:, :self.dimension]
+            positions[-i:] -= self.offset[None, :self.dimension]
+            positions[-i:] /= self.scale[None, :self.dimension]
+            if self.return_activation:
+                weights[-i:] = activation[:, 3]
+            else:
+                weights[-i:] = 1
+        return img, positions, weights
 
     def __len__(self):
         return len(self.imgs)
@@ -127,13 +142,11 @@ class ForwardModel(object):
 
         self.psf_radius = psf_radius
         self.background_noise = background_noise
-        self.random_state = check_random_state(random_state)
-        imgs, self.affine, positions, weights = fetch_smlm_dataset(name='Beads',
-                                                                   modality=modality)
-        positions = np.array(positions)
-        weights = np.array(weights)
-        self.offsets = positions[0, :, :2]
-        self.weights = weights[0]
+        imgs, self.affine, activations, max_n_beads = fetch_smlm_dataset(
+            name='Beads',
+            modality=modality)
+        self.offsets = activations.loc[0].values[:, :2]
+        self.weights = activations.loc[0].values[:, 3]
 
         imgs = np.array(imgs) - self.background_noise
         k, m, n = imgs.shape
@@ -171,7 +184,7 @@ class ForwardModel(object):
         y_slice = slice(y_nnz.min(), y_nnz.max() + 1)
 
         n_beads = len(self.offsets)
-        bead = self.random_state.randint(0, n_beads)
+        bead = np.random.randint(0, n_beads)
         xs, ys = self.offsets[bead]
         weight = self.weights[bead]
 
@@ -220,15 +233,14 @@ class EMCCD(object):
         self.baseline = baseline
         self.e_per_adu = e_per_adu
         self.background_noise = background_noise
-        self.random_state = check_random_state(random_state)
 
     def add_noise(self, photon_counts):
-        n_ie = self.random_state.poisson(
+        n_ie = np.random.poisson(
             self.quantum_efficiency * (
-                        photon_counts + self.background_noise) + self.spurious_charge)
-        n_oe = self.random_state.gamma(n_ie + 0.001, scale=self.em_gain)
-        n_oe = n_oe + self.random_state.normal(0.0, self.read_noise,
-                                               n_oe.shape)
+                    photon_counts + self.background_noise) + self.spurious_charge)
+        n_oe = np.random.gamma(n_ie + 0.001, scale=self.em_gain)
+        n_oe = n_oe + np.random.normal(0.0, self.read_noise,
+                                       n_oe.shape)
         adu_out = (n_oe / self.e_per_adu).astype(int) + self.baseline
         return self.center(np.minimum(adu_out, 65535))
 
@@ -236,8 +248,8 @@ class EMCCD(object):
         return self.quantum_efficiency * self.em_gain / self.e_per_adu
 
     def mean(self):
-        return (
-                           self.background_noise * self.quantum_efficiency + self.spurious_charge) * self.em_gain / \
+        return (self.background_noise * self.quantum_efficiency
+                + self.spurious_charge) * self.em_gain / \
                self.e_per_adu + self.baseline
 
     def center(self, img):
@@ -249,31 +261,33 @@ class UniformCardinalityPrior(object):
         self.min, self.max, self.min_w, self.max_w = (
             np.array([0, 0, -750]), np.array([6400, 6400, 750]), 1000, 7000)
         self.n = n
-        self.random_state = check_random_state(random_state)
 
     def sample(self, batch_size):
-        weights = self.random_state.uniform(self.min_w, self.max_w,
-                                            (batch_size, self.n))
+        weights = np.random.uniform(self.min_w, self.max_w,
+                                    (batch_size, self.n))
         #  each frame gets a number of sources that is uniform in {0, ..., N}
-        n_sources = self.random_state.randint(0, self.n + 1, batch_size)
+        n_sources = np.random.randint(0, self.n + 1, batch_size)
         for b_idx in range(batch_size):
             weights[b_idx, :n_sources[b_idx]] = 0.0
-        thetas = self.random_state.uniform(low=self.min, high=self.max,
-                                           size=(
-                                               batch_size, self.n,
-                                               len(self.min)))
+        thetas = np.random.uniform(low=self.min, high=self.max,
+                                   size=(batch_size, self.n,
+                                       len(self.min)))
         return thetas, weights
 
 
 class SyntheticSMLMDataset(Dataset):
     def __init__(self, n_beads=3, noise=100, batch_size=256,
-                 length=100, random_state=None, modality='2D'):
+                 length=100, random_state=None, modality='2D',
+                 return_activation=True,
+                 psf_radius=2700,
+                 dimension=3):
         self.parameter_prior = UniformCardinalityPrior(
             n_beads, random_state=random_state)
-        self.offset = torch.tensor([0., 0., -750.])
-        self.scale = torch.tensor([6400., 6400., 1500.])
+        self.offset = np.array([0., 0., -750.], dtype=np.float32)
+        self.scale = np.array([6400., 6400., 1500.], dtype=np.float32)
         self.forward_model = ForwardModel(background_noise=noise,
                                           modality=modality,
+                                          psf_radius=psf_radius,
                                           random_state=random_state)
 
         self.noise_model = EMCCD(background_noise=noise,
@@ -282,14 +296,17 @@ class SyntheticSMLMDataset(Dataset):
         self.batch_size = batch_size
         self.length = length
 
+        self.return_activation = return_activation
+
+        assert dimension in [2, 3]
+        self.dimension = dimension
+
     def __getitem__(self, i):
         images, positions, weights = self.sample()
-        positions -= self.offset[None, :]
-        positions /= self.scale[None, :]
+
         if self.batch_size == 1:
-            return images[0][None, :], positions[0], weights[0]
-        else:
-            return images[:, None], positions, weights
+            images, positions, weights = images[0], positions[0], weights[0]
+        return images, positions, weights
 
     def __len__(self):
         return self.length
@@ -302,5 +319,16 @@ class SyntheticSMLMDataset(Dataset):
         weights = weights.astype('float32')
         noiseless = self.forward_model.sample(positions, weights)
         images = self.noise_model.add_noise(noiseless).astype('float32')
+
+        images = images[:, None]
+        positions -= self.offset[None, :]
+        positions /= self.scale[None, :]
+
+        if self.dimension == 2:
+            positions = positions[:, :, :2]
+
+        if not self.return_activation:
+            weights[weights != 0] = 1
+
         return (torch.from_numpy(images), torch.from_numpy(positions),
                 torch.from_numpy(weights))
