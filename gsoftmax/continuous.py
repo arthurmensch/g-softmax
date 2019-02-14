@@ -273,54 +273,59 @@ class ResLinear(nn.Module):
 
 
 class DeepLoco(nn.Module):
-    def __init__(self, beads=10):
+    def __init__(self, beads=10, dimension=3):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(1, 16, 5, padding=2),
-            # nn.BatchNorm2d(16),
+            nn.BatchNorm2d(16),
             nn.Conv2d(16, 16, 5, padding=2),
-            # nn.BatchNorm2d(16),
+            nn.BatchNorm2d(16),
             nn.Conv2d(16, 64, 2, stride=2),
-            # nn.BatchNorm2d(64),
+            nn.BatchNorm2d(64),
             nn.ReLU(True),
             nn.Conv2d(64, 64, 3, padding=1),
-            # nn.BatchNorm2d(64),
+            nn.BatchNorm2d(64),
             nn.ReLU(True),
             nn.Conv2d(64, 256, 2, stride=2),
-            # nn.BatchNorm2d(256),
+            nn.BatchNorm2d(256),
             nn.ReLU(True),
             nn.Conv2d(256, 256, 3, padding=1),
-            # nn.BatchNorm2d(256),
+            nn.BatchNorm2d(256),
             nn.ReLU(True),
             nn.Conv2d(256, 256, 3, padding=1),
-            # nn.BatchNorm2d(256),
+            nn.BatchNorm2d(256),
             nn.ReLU(True),
             nn.Conv2d(256, 256, 4, stride=4),
-            # nn.BatchNorm2d(256),
+            nn.BatchNorm2d(256),
             nn.ReLU(True),
         )
 
         self.resnet = nn.Sequential(
             nn.Linear(4096, 2048),
-            # nn.BatchNorm1d(2048),
+            nn.BatchNorm1d(2048),
             nn.ReLU(True),
             nn.Linear(2048, 2048),
+            nn.BatchNorm1d(2048),
             nn.ReLU(True),
             nn.Linear(2048, 2048),
+            nn.BatchNorm1d(2048),
             nn.ReLU(True),
             nn.Linear(2048, 2048),
+            nn.BatchNorm1d(2048),
+            nn.ReLU(True),
         )
 
         self.weight_fc = nn.Linear(2048, beads)
-        self.pos_fc = nn.Linear(2048, beads * 3)
+        self.pos_fc = nn.Linear(2048, beads * dimension)
 
+        self.dimension = dimension
         self.beads = beads
 
     def forward(self, x):
         x = self.conv(x)
         x = x.reshape(-1, 4096)
         x = self.resnet(x)
-        position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads, 3))
+        position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads, self.dimension))
         weights = self.weight_fc(x)
         weights = F.relu(weights)
         return position, weights
