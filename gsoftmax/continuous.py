@@ -4,7 +4,8 @@ from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import ModuleList
+
+import numpy as np
 
 
 def duality_gap(potential, new_potential):
@@ -105,7 +106,8 @@ class MeasureDistance(nn.Module):
             if self.kernel in ['energy', 'energy_squared']:
                 return distance
             elif self.kernel in ['laplacian', 'gaussian']:
-                multiplier = 2 if self.kernel == 'laplacian' else math.sqrt(2 * math.pi)
+                multiplier = 2 if self.kernel == 'laplacian' else math.sqrt(
+                    2 * math.pi)
                 return torch.exp(distance) / multiplier / self.sigma
             raise ValueError(f'Wrong kernel argument for'
                              f' distance_type==2, got `{self.kernel}`')
@@ -124,7 +126,7 @@ class MeasureDistance(nn.Module):
                              f'got `{self.distance_type}`')
 
     def potential(self, x: torch.tensor, a: torch.tensor,
-                  y: torch.tensor = None, b: torch.tensor = None,):
+                  y: torch.tensor = None, b: torch.tensor = None, ):
         """
 
         :param x: shape(batch_size, l, d)
@@ -253,6 +255,29 @@ class MeasureDistance(nn.Module):
             diff[b == 0] = 0
             res += torch.sum(diff * b, dim=1)
 
+        # g1 = np.linspace(0, 1, 10)
+        # g2 = np.linspace(0, 1, 10)
+        # grid = np.meshgrid(g1, g2)
+        # grid = np.concatenate((grid[0][:, :, None], grid[1][:, :, None]),
+        #                       axis=2)
+        # grid = grid.reshape((-1, 2))
+        # grid = torch.from_numpy(grid).float()[None, :]
+        #
+        # fe = self.extrapolate(potential=f, target_pos=grid, pos=x,
+        #                       weight=a).detach().numpy()
+        # ge = self.extrapolate(potential=g, target_pos=grid, pos=y,
+        #                       weight=b).detach().numpy()
+        # import matplotlib.pyplot as plt
+        # fig, axes = plt.subplots(2, 2)
+        # axes[0, 0].scatter(x.detach()[0, :, 0], x.detach()[0, :, 1])
+        # axes[0, 1].contour(g1, g2, fe[0].reshape(len(g1), len(g2)), 50)
+        # axes[1, 0].scatter(y.detach()[0, :, 0], y.detach()[0, :, 1])
+        # axes[1, 1].contour(g1, g2, ge[0].reshape(len(g1), len(g2)), 50)
+        # for ax in axes.ravel():
+        #     ax.set_xlim([0, 1])
+        #     ax.set_ylim([0, 1])
+        # plt.show()
+
         if self.reduction == 'mean':
             res = res.mean()
         elif self.reduction == 'sum':
@@ -300,7 +325,7 @@ class DeepLoco(nn.Module):
             nn.ReLU(True),
         )
 
-        self.resnet = nn.Sequential(
+        self.weight_fc = nn.Sequential(
             nn.Linear(4096, 2048),
             # nn.BatchNorm1d(2048),
             nn.ReLU(True),
@@ -313,10 +338,24 @@ class DeepLoco(nn.Module):
             nn.Linear(2048, 2048),
             # nn.BatchNorm1d(2048),
             nn.ReLU(True),
+            nn.Linear(2048, beads)
         )
 
-        self.weight_fc = nn.Linear(2048, beads)
-        self.pos_fc = nn.Linear(2048, beads * dimension)
+        self.pos_fc = nn.Sequential(
+            nn.Linear(4096, 2048),
+            # nn.BatchNorm1d(2048),
+            nn.ReLU(True),
+            nn.Linear(2048, 2048),
+            # nn.BatchNorm1d(2048),
+            nn.ReLU(True),
+            nn.Linear(2048, 2048),
+            # nn.BatchNorm1d(2048),
+            nn.ReLU(True),
+            nn.Linear(2048, 2048),
+            # nn.BatchNorm1d(2048),
+            nn.ReLU(True),
+            nn.Linear(2048, beads * dimension)
+        )
 
         self.dimension = dimension
         self.beads = beads
@@ -324,8 +363,8 @@ class DeepLoco(nn.Module):
     def forward(self, x):
         x = self.conv(x)
         x = x.reshape(-1, 4096)
-        x = self.resnet(x)
-        position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads, self.dimension))
+        position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads,
+                                                        self.dimension))
         weights = self.weight_fc(x)
-        # weights = torch.sigmoid(weights / 1000)
+        weights = torch.exp(weights)
         return position, weights

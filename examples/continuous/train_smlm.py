@@ -5,6 +5,8 @@ from os.path import join, expanduser
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from gsoftmax.continuous import MeasureDistance, DeepLoco
+from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
 from sacred import Experiment
 from sacred import SETTINGS
 from sacred.observers import FileStorageObserver
@@ -12,10 +14,7 @@ from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import pairwise_distances
 from torch import nn
 from torch.optim import Adam
-from torch.utils.data import DataLoader, Subset
-
-from gsoftmax.continuous import MeasureDistance, DeepLoco
-from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
+from torch.utils.data import DataLoader
 
 SETTINGS.HOST_INFO.INCLUDE_GPU_INFO = False
 
@@ -26,7 +25,7 @@ exp.observers.append(FileStorageObserver.create(base_dir))
 
 @exp.config
 def system():
-    device = 0
+    device = 'cpu'
     seed = 100
     checkpoint = None
     log_interval = 10
@@ -47,8 +46,8 @@ def base():
     terms = 'symmetric'
     kernel = 'laplacian'
 
-    batch_size = 1024
-    train_size = int(1024 * 1)
+    batch_size = 1
+    train_size = int(1)
     eval_size = 2048
     test_size = 2
 
@@ -233,8 +232,7 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
             weights = weights.to(device)
             if train:
                 optimizer.zero_grad()
-            loss, pred_positions, pred_weights = model_loss(imgs,
-                                                            positions, weights)
+            loss, pred_positions, pred_weights = model_loss(imgs, positions, weights)
 
             if train:
                 loss.backward()
@@ -257,6 +255,7 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
                                                 f'img_{fold}_e_{epoch}_{i}.png'))
             records['loss'] += loss.item() * batch_size
             n_samples += batch_size
+            print(pred_weights)
             if train:
                 optimizer.step()
                 if batch_idx % log_interval == 0:
@@ -320,7 +319,7 @@ def main(test_source, train_size, n_jobs,
 
     plot_example(datasets, output_dir=output_dir)
 
-    model = DeepLoco(beads=256, dimension=dimension)
+    model = DeepLoco(beads=50, dimension=dimension)
     loss_fns = []
     for sigma in sigmas:
         loss_fns.append(MeasureDistance(loss=loss,
@@ -330,7 +329,7 @@ def main(test_source, train_size, n_jobs,
                                         kernel=kernel,
                                         max_iter=100,
                                         sigma=sigma,
-                                        graph_surgery='loop',
+                                        graph_surgery='',
                                         verbose=False,
                                         epsilon=epsilon, rho=rho,
                                         reduction='mean'))
@@ -350,7 +349,7 @@ def main(test_source, train_size, n_jobs,
     for epoch in range(n_epochs):
         np.random.seed(0)
         if not test_only:
-            train_eval_loop(loss_model, loaders['test'], 'test', epoch,
+            train_eval_loop(loss_model, loaders['train'], 'train', epoch,
                             optimizer=optimizer,
                             train=True, output_dir=output_dir)
         # train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,

@@ -90,11 +90,10 @@ def fetch_smlm_dataset(name='MT0.N1.LD', modality='2D',
 
 class SMLMDataset(Dataset):
     def __init__(self, name='MT0.N1.LD', modality='2D', dimension=3,
-                 transform=None, return_activation=True, length=None):
+                 return_activation=True, length=None):
         (imgs, offset, scale, self.activations, self.max_beads, self.w_range)\
             = fetch_smlm_dataset(name=name, modality=modality)
 
-        self.transform = transform
         self.return_activation = return_activation
 
         assert dimension in [2, 3]
@@ -113,8 +112,8 @@ class SMLMDataset(Dataset):
     def __getitem__(self, index):
         img = self.imgs[index][None, :]
 
-        if self.transform is not None:
-            img = self.transform(img)
+        img = img - img.view(1, -1).mean(1)[:, None, None]
+        img /= img.view(1, -1).std(1)[:, None, None]
 
         positions = torch.zeros((self.max_beads, self.dimension))
         weights = torch.zeros((self.max_beads,))
@@ -143,12 +142,13 @@ class SMLMDataset(Dataset):
 
 
 class SyntheticSMLMDataset(Dataset):
-    def __init__(self, scale, offset, shape, w_range,
+    def __init__(self, offset, scale, shape, w_range,
                  max_beads=3, noise=100, batch_size=1,
                  length=100, modality='2D', return_activation=True,
                  psf_radius=2700, dimension=3):
 
-        self.forward_model = ForwardModel(modality=modality,
+        self.forward_model = ForwardModel(offset, scale, shape,
+                                          modality=modality,
                                           background_noise=noise,
                                           psf_radius=psf_radius,)
 
@@ -182,35 +182,21 @@ class SyntheticSMLMDataset(Dataset):
         self.w_range = w_range
 
     def __getitem__(self, i):
-        images, positions, weights = self.sample()
-
-        if self.batch_size == 1:
-            images, positions, weights = images[0], positions[0], weights[0]
-        return images, positions, weights
-
-    def __len__(self):
-        return self.length
-
-    def get_geometry(self):
-        return self.offset.clone(), self.scale.clone(), self.shape,\
-               self.max_beads, self.w_range
-
-    def sample(self, batch_size=None):
-        if batch_size is None:
-            batch_size = self.batch_size
-        positions, weights = self.parameter_prior.sample(batch_size)
+        positions, weights = self.parameter_prior.sample(self.batch_size)
         positions = positions.astype('float32')
         weights = weights.astype('float32')
-        noiseless = self.forward_model.sample(positions, weights,
-                                              self.offset, self.scale,
-                                              self.shape)
-        images = self.noise_model.add_noise(noiseless).astype('float32')
+        noiseless = self.forward_model.sample(positions, weights)
+        imgs = self.noise_model.add_noise(noiseless).astype('float32')
 
-        images = torch.from_numpy(images)
+        b, m, n = imgs.shape
+        imgs = imgs[:, None]
+
+        imgs = torch.from_numpy(imgs)
         positions = torch.from_numpy(positions)
         weights = torch.from_numpy(weights)
 
-        images = images[:, None]
+        imgs -= imgs.view(b, 1, -1).mean(2)[:, :, None, None]
+        imgs /= imgs.view(b, 1, -1).std(2)[:, :, None, None]
 
         if self.dimension == 2:
             positions = positions[:, :, :2]
@@ -221,11 +207,21 @@ class SyntheticSMLMDataset(Dataset):
         if not self.return_activation:
             weights[weights != 0] = 1
 
-        return images, positions, weights
+        if self.batch_size == 1:
+            imgs, positions, weights = imgs[0], positions[0], weights[0]
+        return imgs, positions, weights
+
+    def __len__(self):
+        return self.length
+
+    def get_geometry(self):
+        return self.offset.clone(), self.scale.clone(), self.shape,\
+               self.max_beads, self.w_range
 
 
 class ForwardModel(object):
-    def __init__(self, modality='2D', psf_radius=2700.0,
+    def __init__(self, offset, scale, shape,
+                 modality='2D', psf_radius=2700.0,
                  background_noise=100, ):
         """
         Use saved data from a z-stack to generate simulated STORM images
@@ -256,45 +252,11 @@ class ForwardModel(object):
         self.z_offset = source_offset[2]
         self.z_scale = source_scale[2]
 
-    def draw(self, x, y, z, w, img, offset, scale):
-        """
-        Render a point source at (x, y, z) nm with weight w
-        onto the passed-in img.
-        """
-        m, n = img.shape
+        self.offset = offset
+        self.scale = scale
+        self.shape = shape
 
-        assert self.z_offset < z < self.z_offset + self.z_scale
-        z_scaled = (z - self.z_offset) / self.z_scale
-        zl = int(np.floor(z_scaled))
-        zu = int(np.ceil(z_scaled))
-
-        gridx = np.linspace(offset[0], scale[0] + offset[0], m, endpoint=False) - x
-        gridy = np.linspace(offset[1], scale[1] + offset[1], n, endpoint=False) - y
-        # gridx *= 3
-        # gridy *= 3
-        x_mask = abs(gridx) < self.psf_radius
-        y_mask = abs(gridy) < self.psf_radius
-        x_nnz = x_mask.nonzero()[0]
-        y_nnz = y_mask.nonzero()[0]
-        x_slice = slice(x_nnz.min(), x_nnz.max() + 1)
-        y_slice = slice(y_nnz.min(), y_nnz.max() + 1)
-
-        n_beads = len(self.centers)
-        bead = np.random.randint(0, n_beads)
-        xs, ys = self.centers[bead]
-        weight = self.weights[bead]
-
-        alpha = zu - z_scaled
-
-        fx = (gridx + xs)[x_slice]
-        fy = (gridy + ys)[y_slice]
-        imgl = self.splines[zl](fy, fx)
-        imgu = self.splines[zu](fy, fx)
-        img[y_slice, x_slice] += ((alpha * imgl + (1 - alpha) * imgu)
-                                  * w / weight)
-        return img
-
-    def sample(self, positions, weights, offset, scale, shape):
+    def sample(self, positions, weights):
         """
         Generate a batch empirically.
         """
@@ -304,13 +266,46 @@ class ForwardModel(object):
         assert positions.shape == (batch_size, length, 3)
         assert weights.shape == (batch_size, length)
 
-        imgs = np.zeros((batch_size, shape[0], shape[1]),
-                        dtype=positions.dtype)
+        m, n = self.shape
+        imgs = np.zeros((batch_size, m, n), dtype=positions.dtype)
 
         for img, position, weight in zip(imgs, positions, weights):
             for ((x, y, z), w) in zip(position, weight):
                 if w != 0.0:
-                    self.draw(x, y, z, w, img, offset, scale)
+                    assert self.z_offset < z < self.z_offset + self.z_scale
+                    z_scaled = (z - self.z_offset) / self.z_scale
+                    zl = int(np.floor(z_scaled))
+                    zu = int(np.ceil(z_scaled))
+
+                    gridx = np.linspace(self.offset[0],
+                                        self.scale[0] + self.offset[0], m,
+                                        endpoint=False) - x
+                    gridy = np.linspace(self.offset[1],
+                                        self.scale[1] + self.offset[1], n,
+                                        endpoint=False) - y
+                    gridx *= 3
+                    gridy *= 3
+                    x_mask = abs(gridx) < self.psf_radius
+                    y_mask = abs(gridy) < self.psf_radius
+                    x_nnz = x_mask.nonzero()[0]
+                    y_nnz = y_mask.nonzero()[0]
+                    x_slice = slice(x_nnz.min(), x_nnz.max() + 1)
+                    y_slice = slice(y_nnz.min(), y_nnz.max() + 1)
+
+                    n_beads = len(self.centers)
+                    bead = np.random.randint(0, n_beads)
+                    xs, ys = self.centers[bead]
+                    weight = self.weights[bead]
+
+                    alpha = zu - z_scaled
+
+                    fx = (gridx + xs)[x_slice]
+                    fy = (gridy + ys)[y_slice]
+                    imgl = self.splines[zl](fy, fx)
+                    imgu = self.splines[zu](fy, fx)
+                    img[y_slice, x_slice] += (
+                                (alpha * imgl + (1 - alpha) * imgu)
+                                * w / weight)
         return imgs
 
 

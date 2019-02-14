@@ -36,11 +36,11 @@ b = b[None, :]
 y = y[None, :]
 
 
-sinkhorn_divergence = MeasureDistance(loss='sinkhorn',
+sinkhorn_divergence = MeasureDistance(loss='mmd',
                                       coupled=True,
                                       terms='symmetric',
-                                      distance_type=2,
-                                      kernel='energy_squared',
+                                      distance_type=1,
+                                      kernel='laplacian',
                                       max_iter=100,
                                       rho=1,
                                       sigma=1, graph_surgery='',
