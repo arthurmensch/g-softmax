@@ -11,8 +11,10 @@ from sacred.observers import FileStorageObserver
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import pairwise_distances
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.optim import Adam
+from torch.utils.data import DataLoader, Subset
 
+from gsoftmax.continuous import MeasureDistance, DeepLoco
 from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
 
 SETTINGS.HOST_INFO.INCLUDE_GPU_INFO = False
@@ -25,11 +27,11 @@ exp.observers.append(FileStorageObserver.create(base_dir))
 @exp.config
 def system():
     device = 0
-    # seed = 100
+    seed = 100
     checkpoint = None
     log_interval = 100
 
-    n_jobs = 8
+    n_jobs = 4
 
     test_only = False
 
@@ -37,35 +39,34 @@ def system():
 @exp.config
 def base():
     test_source = 'MT0.N1.LD'
-    modality = 'AS'
-    dimension = 3
-
-    n_beads = 10
+    modality = '2D'
+    dimension = 2
 
     loss = 'mmd'
     coupled = True
     terms = 'symmetric'
     kernel = 'laplacian'
 
-    batch_size = 1024
-    train_size = int(1024 * 1e4)
+    batch_size = 256
+    train_size = 256
+    eval_size = 256
+    test_size = 256
 
     distance_type = 1
-    eval_size = 2048
 
-    sigmas = [0.01, 0.02, 0.04, 0.12]
+    sigmas = [0.12]
     epsilon = 1
     rho = 1
     lr = 1e-3
 
-    n_epochs = 10
+    n_epochs = 100
 
 
 @exp.named_config
 def test_only():
+    device = 'cpu'
     test_only = True
-    checkpoint = expanduser('~/output/g-softmax/smlm/45/artifacts/'
-                            'checkpoint_3.pkl')
+    checkpoint = None
 
 
 class ModelLoss(nn.Module):
@@ -96,7 +97,7 @@ def plot_example(datasets, output_dir):
         ax.set_ylim([0, n])
         ax.set_title(f'{fold} example')
         ax.axis('off')
-    plt.show()
+    # plt.show()
     plt.savefig(join(output_dir, 'examples.png'))
     plt.close(fig)
 
@@ -162,7 +163,6 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
             tp = (match < threshold).sum()
             fp = len(match) - tp
             jaccard = float(tp) / (fn + fp + tp)
-            print(fn, fp, tp, jaccard)
 
             if dim == 2:
                 rmse_xy = match.sum()
@@ -172,8 +172,8 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
                                                     metric='euclidean')
                 cost_matrix_z = pairwise_distances(ppos[:, 2:3], pos[:, 2:3],
                                                    metric='euclidean')
-                rmse_xy = (cost_matrix_xy[row_ind, col_ind] ** 2).mean()
-                rmse_z = (cost_matrix_z[row_ind, col_ind] ** 2).mean()
+                rmse_xy = np.sqrt((cost_matrix_xy[row_ind, col_ind] ** 2).mean())
+                rmse_z = np.sqrt((cost_matrix_z[row_ind, col_ind] ** 2).mean())
 
         jaccards.append(jaccard)
         rmses_xy.append(rmse_xy)
@@ -238,6 +238,9 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
 
             if train:
                 loss.backward()
+                print(loss.item())
+                print(positions.detach())
+                print(weights.detach())
             else:
                 jaccard, rmse_xy, rmse_z = metrics(
                     pred_positions, pred_weights, positions, weights,
@@ -247,7 +250,7 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
                 records['rmse_z'] += rmse_z * batch_size
 
             if batch_idx == 0:
-                for i in range(3):
+                for i in range(1):
                     plot_pred_ground_truth(pred_positions[i],
                                            pred_weights[i],
                                            positions[i],
@@ -259,24 +262,24 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
             n_samples += batch_size
             if train:
                 optimizer.step()
-                if batch_idx % log_interval == 0:
-                    print(f'{fold} epoch: {epoch} '
-                          f'[{batch_idx * batch_size}/{len(loader.dataset)} '
-                          f'({100. * batch_idx / len(loader):.0f}%)]\t'
-                          f'Loss: {loss.item():.6f}')
-    print(f"=================> {fold} epoch: {epoch}", flush=False)
-    for name, record in records.items():
-        print(f'{fold}.{name} : {record / n_samples} ', flush=False)
-        _run.log_scalar(f'{fold}.{name}', record / n_samples, epoch)
-    print('')
+                # if batch_idx % log_interval == 0:
+                #     print(f'{fold} epoch: {epoch} '
+                #           f'[{batch_idx * batch_size}/{len(loader.dataset)} '
+                #           f'({100. * batch_idx / len(loader):.0f}%)]\t'
+                #           f'Loss: {loss.item():.6f}')
+    # print(f"=================> {fold} epoch: {epoch}", flush=False)
+    # for name, record in records.items():
+    #     print(f'{fold}.{name} : {record / n_samples} ', flush=False)
+    #     _run.log_scalar(f'{fold}.{name}', record / n_samples, epoch)
+    # print('')
 
 
 @exp.main
 def main(test_source, train_size, n_jobs,
          eval_size, batch_size, n_epochs, checkpoint,
-         distance_type, test_only, dimension,
+         distance_type, test_only, dimension, test_size,
          loss, coupled, terms, kernel, sigmas, epsilon, rho, lr,
-         modality, device, n_beads, _seed, _run):
+         modality, device, _seed, _run):
     output_dir = join(base_dir, str(_run._id), 'artifacts')
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -291,13 +294,12 @@ def main(test_source, train_size, n_jobs,
 
     datasets['test'] = SMLMDataset(name=test_source, modality=modality,
                                    dimension=dimension,
-                                   return_activation=False)
+                                   return_activation=False, length=test_size)
     loaders['test'] = DataLoader(datasets['test'], batch_size=batch_size,
                                  num_workers=1)
     # Use geometrical information to construct synthetics datasets
     offset, scale, shape, max_beads, w_range = datasets['test'].get_geometry()
-    scale[:2] *= 3
-    print(f'Dataset infp: offset {offset}, scale {scale}, shape {shape},'
+    print(f'Dataset info: offset {offset}, scale {scale}, shape {shape},'
           f' max_beads {max_beads}, w_range {w_range}')
     for fold in ['train', 'eval']:
         datasets[fold] = SyntheticSMLMDataset(max_beads=max_beads, noise=100,
@@ -319,47 +321,47 @@ def main(test_source, train_size, n_jobs,
                                    shuffle=fold == 'train')
 
     plot_example(datasets, output_dir=output_dir)
-    #
-    # model = DeepLoco(beads=100, dimension=dimension)
-    # loss_fns = []
-    # for sigma in sigmas:
-    #     loss_fns.append(MeasureDistance(loss=loss,
-    #                                     coupled=coupled,
-    #                                     terms=terms,
-    #                                     distance_type=distance_type,
-    #                                     kernel=kernel,
-    #                                     max_iter=100,
-    #                                     sigma=sigma,
-    #                                     graph_surgery='loop',
-    #                                     verbose=False,
-    #                                     epsilon=epsilon, rho=rho,
-    #                                     reduction='mean'))
-    # loss_model = ModelLoss(model, loss_fns)
-    #
-    # if not test_only:
-    #     optimizer = Adam(loss_model.parameters(), lr=lr)
-    # else:
-    #     n_epochs = 1
-    #     optimizer = None
-    #
-    # if checkpoint is not None:
-    #     load_checkpoint(checkpoint, model, optimizer=optimizer)
-    #
-    # loss_model.to(device)
-    #
-    # for epoch in range(n_epochs):
-    #     np.random.seed()
-    #     if not test_only:
-    #         train_eval_loop(loss_model, loaders['train'], 'train', epoch,
-    #                         optimizer=optimizer,
-    #                         train=True, output_dir=output_dir)
-    #     train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
-    #                     output_dir=output_dir)
-    #     train_eval_loop(loss_model, loaders['test'], 'test', epoch,
-    #                     output_dir=output_dir)
-    #     if not test_only:
-    #         save_checkpoint(model, optimizer,
-    #                         join(output_dir, f'checkpoint_{epoch}.pkl'))
+
+    model = DeepLoco(beads=256, dimension=dimension)
+    loss_fns = []
+    for sigma in sigmas:
+        loss_fns.append(MeasureDistance(loss=loss,
+                                        coupled=coupled,
+                                        terms=terms,
+                                        distance_type=distance_type,
+                                        kernel=kernel,
+                                        max_iter=100,
+                                        sigma=sigma,
+                                        graph_surgery='loop',
+                                        verbose=False,
+                                        epsilon=epsilon, rho=rho,
+                                        reduction='mean'))
+    loss_model = ModelLoss(model, loss_fns)
+
+    if not test_only:
+        optimizer = Adam(loss_model.parameters(), lr=lr, amsgrad=True)
+    else:
+        n_epochs = 1
+        optimizer = None
+
+    if checkpoint is not None:
+        load_checkpoint(checkpoint, model, optimizer=optimizer)
+
+    loss_model.to(device)
+
+    for epoch in range(n_epochs):
+        np.random.seed(0)
+        if not test_only:
+            train_eval_loop(loss_model, loaders['train'], 'train', epoch,
+                            optimizer=optimizer,
+                            train=True, output_dir=output_dir)
+        # train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
+        #                 output_dir=output_dir)
+        # train_eval_loop(loss_model, loaders['test'], 'test', epoch,
+        #                 output_dir=output_dir)
+        if not test_only:
+            save_checkpoint(model, optimizer,
+                            join(output_dir, f'checkpoint_{epoch}.pkl'))
 
 
 if __name__ == '__main__':

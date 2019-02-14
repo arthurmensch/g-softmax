@@ -90,7 +90,7 @@ def fetch_smlm_dataset(name='MT0.N1.LD', modality='2D',
 
 class SMLMDataset(Dataset):
     def __init__(self, name='MT0.N1.LD', modality='2D', dimension=3,
-                 transform=None, return_activation=True):
+                 transform=None, return_activation=True, length=None):
         (imgs, offset, scale, self.activations, self.max_beads, self.w_range)\
             = fetch_smlm_dataset(name=name, modality=modality)
 
@@ -101,8 +101,13 @@ class SMLMDataset(Dataset):
         self.dimension = dimension
 
         self.imgs = torch.from_numpy(imgs)
-        self.scale = torch.from_numpy(scale)[:self.dimension]
+
+        if length is not None:
+            self.imgs = self.imgs[:length]
+            self.activations = self.activations[:length]
+
         self.offset = torch.from_numpy(offset)[:self.dimension]
+        self.scale = torch.from_numpy(scale)[:self.dimension]
         self.shape = imgs.shape[1:]
 
     def __getitem__(self, index):
@@ -187,7 +192,8 @@ class SyntheticSMLMDataset(Dataset):
         return self.length
 
     def get_geometry(self):
-        return self.offset.clone(), self.scale.clone(), self.shape, self.max_beads, self.w_range
+        return self.offset.clone(), self.scale.clone(), self.shape,\
+               self.max_beads, self.w_range
 
     def sample(self, batch_size=None):
         if batch_size is None:
@@ -262,11 +268,12 @@ class ForwardModel(object):
         zl = int(np.floor(z_scaled))
         zu = int(np.ceil(z_scaled))
 
-        gridx = np.linspace(offset[0], scale[0] + offset[0], m, endpoint=False)
-        gridy = np.linspace(offset[1], scale[1] + offset[1], n, endpoint=False)
-
-        x_mask = abs(gridx - x) < self.psf_radius
-        y_mask = abs(gridy - y) < self.psf_radius
+        gridx = np.linspace(offset[0], scale[0] + offset[0], m, endpoint=False) - x
+        gridy = np.linspace(offset[1], scale[1] + offset[1], n, endpoint=False) - y
+        gridx *= 3
+        gridy *= 3
+        x_mask = abs(gridx) < self.psf_radius
+        y_mask = abs(gridy) < self.psf_radius
         x_nnz = x_mask.nonzero()[0]
         y_nnz = y_mask.nonzero()[0]
         x_slice = slice(x_nnz.min(), x_nnz.max() + 1)
@@ -279,8 +286,8 @@ class ForwardModel(object):
 
         alpha = zu - z_scaled
 
-        fx = (gridx + (xs - x))[x_slice]
-        fy = (gridx + (ys - y))[y_slice]
+        fx = (gridx + xs)[x_slice]
+        fy = (gridy + ys)[y_slice]
         imgl = self.splines[zl](fy, fx)
         imgu = self.splines[zu](fy, fx)
         img[y_slice, x_slice] += ((alpha * imgl + (1 - alpha) * imgu)
@@ -357,6 +364,7 @@ class UniformCardinalityPrior(object):
         weights = np.random.uniform(self.min_w, self.max_w,
                                     (batch_size, self.n))
         #  each frame gets a number of sources that is uniform in {0, ..., N}
+        # n_sources = np.random.poisson(self.n, batch_size)
         n_sources = np.random.randint(0, self.n + 1, batch_size)
         for b_idx in range(batch_size):
             weights[b_idx, :n_sources[b_idx]] = 0.0

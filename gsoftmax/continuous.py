@@ -277,41 +277,41 @@ class DeepLoco(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(1, 16, 5, padding=2),
-            nn.BatchNorm2d(16),
+            # nn.BatchNorm2d(16),
             nn.Conv2d(16, 16, 5, padding=2),
-            nn.BatchNorm2d(16),
+            # nn.BatchNorm2d(16),
             nn.Conv2d(16, 64, 2, stride=2),
-            nn.BatchNorm2d(64),
+            # nn.BatchNorm2d(64),
             nn.ReLU(True),
             nn.Conv2d(64, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
+            # nn.BatchNorm2d(64),
             nn.ReLU(True),
             nn.Conv2d(64, 256, 2, stride=2),
-            nn.BatchNorm2d(256),
+            # nn.BatchNorm2d(256),
             nn.ReLU(True),
             nn.Conv2d(256, 256, 3, padding=1),
-            nn.BatchNorm2d(256),
+            # nn.BatchNorm2d(256),
             nn.ReLU(True),
             nn.Conv2d(256, 256, 3, padding=1),
-            nn.BatchNorm2d(256),
+            # nn.BatchNorm2d(256),
             nn.ReLU(True),
             nn.Conv2d(256, 256, 4, stride=4),
-            nn.BatchNorm2d(256),
+            # nn.BatchNorm2d(256),
             nn.ReLU(True),
         )
 
         self.resnet = nn.Sequential(
             nn.Linear(4096, 2048),
-            nn.BatchNorm1d(2048),
+            # nn.BatchNorm1d(2048),
             nn.ReLU(True),
             nn.Linear(2048, 2048),
-            nn.BatchNorm1d(2048),
+            # nn.BatchNorm1d(2048),
             nn.ReLU(True),
             nn.Linear(2048, 2048),
-            nn.BatchNorm1d(2048),
+            # nn.BatchNorm1d(2048),
             nn.ReLU(True),
             nn.Linear(2048, 2048),
-            nn.BatchNorm1d(2048),
+            # nn.BatchNorm1d(2048),
             nn.ReLU(True),
         )
 
@@ -327,5 +327,5 @@ class DeepLoco(nn.Module):
         x = self.resnet(x)
         position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads, self.dimension))
         weights = self.weight_fc(x)
-        weights = F.relu(weights)
+        weights = torch.relu(weights)
         return position, weights
