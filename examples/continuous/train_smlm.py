@@ -29,7 +29,7 @@ def system():
     device = 0
     seed = 100
     checkpoint = None
-    log_interval = 100
+    log_interval = 10
 
     n_jobs = 4
 
@@ -47,14 +47,14 @@ def base():
     terms = 'symmetric'
     kernel = 'laplacian'
 
-    batch_size = 256
-    train_size = 256
-    eval_size = 256
-    test_size = 256
+    batch_size = 1024
+    train_size = int(1024 * 1)
+    eval_size = 2048
+    test_size = 2
 
     distance_type = 1
 
-    sigmas = [0.12]
+    sigmas = [0.01, 0.02, 0.04, 0.12]
     epsilon = 1
     rho = 1
     lr = 1e-3
@@ -139,10 +139,10 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
     weights = weights.detach().cpu()
     pred_weights = pred_weights.detach().cpu()
 
-    pred_positions *= scale
-    positions *= scale
-    pred_positions += offset
-    positions += offset
+    pred_positions = pred_positions * scale
+    positions = positions * scale
+    pred_positions = pred_positions + offset
+    positions = positions + offset
 
     for ppos, pweight, pos, weight in zip(pred_positions, pred_weights,
                                           positions, weights):
@@ -238,9 +238,6 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
 
             if train:
                 loss.backward()
-                print(loss.item())
-                print(positions.detach())
-                print(weights.detach())
             else:
                 jaccard, rmse_xy, rmse_z = metrics(
                     pred_positions, pred_weights, positions, weights,
@@ -262,16 +259,17 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
             n_samples += batch_size
             if train:
                 optimizer.step()
-                # if batch_idx % log_interval == 0:
-                #     print(f'{fold} epoch: {epoch} '
-                #           f'[{batch_idx * batch_size}/{len(loader.dataset)} '
-                #           f'({100. * batch_idx / len(loader):.0f}%)]\t'
-                #           f'Loss: {loss.item():.6f}')
-    # print(f"=================> {fold} epoch: {epoch}", flush=False)
-    # for name, record in records.items():
-    #     print(f'{fold}.{name} : {record / n_samples} ', flush=False)
-    #     _run.log_scalar(f'{fold}.{name}', record / n_samples, epoch)
-    # print('')
+                if batch_idx % log_interval == 0:
+                    print(f'{fold} epoch: {epoch} '
+                          f'[{batch_idx * batch_size}/{len(loader.dataset)} '
+                          f'({100. * batch_idx / len(loader):.0f}%)]\t'
+                          f'mean weights: {pred_weights.mean():.3f}\t'
+                          f'loss: {loss.item():.6f}')
+    print(f"=================> {fold} epoch: {epoch}", flush=False)
+    for name, record in records.items():
+        print(f'{fold}.{name} : {record / n_samples} ', flush=False)
+        _run.log_scalar(f'{fold}.{name}', record / n_samples, epoch)
+    print('')
 
 
 @exp.main
@@ -339,7 +337,7 @@ def main(test_source, train_size, n_jobs,
     loss_model = ModelLoss(model, loss_fns)
 
     if not test_only:
-        optimizer = Adam(loss_model.parameters(), lr=lr, amsgrad=True)
+        optimizer = Adam(loss_model.parameters(), lr=lr)
     else:
         n_epochs = 1
         optimizer = None
@@ -352,16 +350,16 @@ def main(test_source, train_size, n_jobs,
     for epoch in range(n_epochs):
         np.random.seed(0)
         if not test_only:
-            train_eval_loop(loss_model, loaders['train'], 'train', epoch,
+            train_eval_loop(loss_model, loaders['test'], 'test', epoch,
                             optimizer=optimizer,
                             train=True, output_dir=output_dir)
         # train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
         #                 output_dir=output_dir)
         # train_eval_loop(loss_model, loaders['test'], 'test', epoch,
         #                 output_dir=output_dir)
-        if not test_only:
-            save_checkpoint(model, optimizer,
-                            join(output_dir, f'checkpoint_{epoch}.pkl'))
+        # if not test_only:
+        #     save_checkpoint(model, optimizer,
+        #                     join(output_dir, f'checkpoint_{epoch}.pkl'))
 
 
 if __name__ == '__main__':

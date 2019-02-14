@@ -270,8 +270,8 @@ class ForwardModel(object):
 
         gridx = np.linspace(offset[0], scale[0] + offset[0], m, endpoint=False) - x
         gridy = np.linspace(offset[1], scale[1] + offset[1], n, endpoint=False) - y
-        gridx *= 3
-        gridy *= 3
+        # gridx *= 3
+        # gridy *= 3
         x_mask = abs(gridx) < self.psf_radius
         y_mask = abs(gridy) < self.psf_radius
         x_nnz = x_mask.nonzero()[0]
