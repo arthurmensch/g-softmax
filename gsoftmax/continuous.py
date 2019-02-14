@@ -300,7 +300,7 @@ class DeepLoco(nn.Module):
             nn.ReLU(True),
         )
 
-        self.resnet = nn.Sequential(
+        self.weight_fc = nn.Sequential(
             nn.Linear(4096, 2048),
             # nn.BatchNorm1d(2048),
             nn.ReLU(True),
@@ -313,10 +313,25 @@ class DeepLoco(nn.Module):
             nn.Linear(2048, 2048),
             # nn.BatchNorm1d(2048),
             nn.ReLU(True),
+            nn.Linear(2048, beads)
         )
 
-        self.weight_fc = nn.Linear(2048, beads)
-        self.pos_fc = nn.Linear(2048, beads * dimension)
+        self.pos_fc = nn.Sequential(
+            nn.Linear(4096, 2048),
+            # nn.BatchNorm1d(2048),
+            nn.ReLU(True),
+            nn.Linear(2048, 2048),
+            # nn.BatchNorm1d(2048),
+            nn.ReLU(True),
+            nn.Linear(2048, 2048),
+            # nn.BatchNorm1d(2048),
+            nn.ReLU(True),
+            nn.Linear(2048, 2048),
+            # nn.BatchNorm1d(2048),
+            nn.ReLU(True),
+            nn.Linear(2048, beads * dimension),
+
+        )
 
         self.dimension = dimension
         self.beads = beads
@@ -324,8 +339,7 @@ class DeepLoco(nn.Module):
     def forward(self, x):
         x = self.conv(x)
         x = x.reshape(-1, 4096)
-        x = self.resnet(x)
-        position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads, self.dimension))
+        position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads, self.dimension) * 10)
         weights = self.weight_fc(x)
-        weights = F.relu(weights)
+        weights = F.sigmoid(weights)
         return position, weights

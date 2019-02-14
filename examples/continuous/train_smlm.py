@@ -51,10 +51,10 @@ def base():
     distance_type = 1
     eval_size = 2048
 
-    sigmas = [64.0 / 6400, 320.0 / 6400, 640.0 / 6400, 1920.0 / 6400]
+    sigmas = [1e-2]
     epsilon = 1
     rho = 1
-    lr = 1e-3
+    lr = 1e-4
 
     n_epochs = 1000
 
@@ -314,7 +314,7 @@ def main(test_source, train_size, n_jobs,
                                         epsilon=epsilon, rho=rho,
                                         reduction='mean'))
     loss_model = ModelLoss(model, loss_fns)
-    optimizer = Adam(loss_model.parameters(), lr=lr)
+    optimizer = Adam(loss_model.parameters(), lr=lr, amsgrad=True)
 
     if checkpoint is not None:
         load_checkpoint(model, optimizer, checkpoint)
