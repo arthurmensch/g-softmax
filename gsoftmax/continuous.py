@@ -255,8 +255,8 @@ class MeasureDistance(nn.Module):
             diff[b == 0] = 0
             res += torch.sum(diff * b, dim=1)
 
-        # g1 = np.linspace(0, 1, 10)
-        # g2 = np.linspace(0, 1, 10)
+        # g1 = np.linspace(0, 1, 100)
+        # g2 = np.linspace(0, 1, 100)
         # grid = np.meshgrid(g1, g2)
         # grid = np.concatenate((grid[0][:, :, None], grid[1][:, :, None]),
         #                       axis=2)
@@ -277,7 +277,6 @@ class MeasureDistance(nn.Module):
         #     ax.set_xlim([0, 1])
         #     ax.set_ylim([0, 1])
         # plt.show()
-
         if self.reduction == 'mean':
             res = res.mean()
         elif self.reduction == 'sum':
@@ -303,8 +302,10 @@ class DeepLoco(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv2d(1, 16, 5, padding=2),
             # nn.BatchNorm2d(16),
+            nn.ReLU(True),
             nn.Conv2d(16, 16, 5, padding=2),
             # nn.BatchNorm2d(16),
+            nn.ReLU(True),
             nn.Conv2d(16, 64, 2, stride=2),
             # nn.BatchNorm2d(64),
             nn.ReLU(True),
@@ -366,5 +367,5 @@ class DeepLoco(nn.Module):
         position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads,
                                                         self.dimension))
         weights = self.weight_fc(x)
-        weights = torch.exp(weights)
+        weights = torch.relu(weights)
         return position, weights

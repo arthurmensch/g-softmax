@@ -28,7 +28,7 @@ def system():
     device = 'cpu'
     seed = 100
     checkpoint = None
-    log_interval = 10
+    log_interval = 100
 
     n_jobs = 4
 
@@ -38,24 +38,24 @@ def system():
 @exp.config
 def base():
     test_source = 'MT0.N1.LD'
-    modality = '2D'
-    dimension = 2
+    modality = 'AS'
+    dimension = 3
 
-    loss = 'mmd'
-    coupled = True
+    loss = 'sinkhorn'
+    coupled = False
     terms = 'symmetric'
-    kernel = 'laplacian'
+    kernel = 'energy_squared'
 
-    batch_size = 1
-    train_size = int(1)
+    batch_size = 1024
+    train_size = int(1024 * 1e3)
     eval_size = 2048
-    test_size = 2
+    test_size = None
 
-    distance_type = 1
+    distance_type = 2
 
-    sigmas = [0.01, 0.02, 0.04, 0.12]
+    sigmas = [0.3]
     epsilon = 1
-    rho = 1
+    rho = 1e-1
     lr = 1e-3
 
     n_epochs = 100
@@ -96,7 +96,7 @@ def plot_example(datasets, output_dir):
         ax.set_ylim([0, n])
         ax.set_title(f'{fold} example')
         ax.axis('off')
-    # plt.show()
+    plt.show()
     plt.savefig(join(output_dir, 'examples.png'))
     plt.close(fig)
 
@@ -255,14 +255,13 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
                                                 f'img_{fold}_e_{epoch}_{i}.png'))
             records['loss'] += loss.item() * batch_size
             n_samples += batch_size
-            print(pred_weights)
             if train:
                 optimizer.step()
                 if batch_idx % log_interval == 0:
                     print(f'{fold} epoch: {epoch} '
                           f'[{batch_idx * batch_size}/{len(loader.dataset)} '
                           f'({100. * batch_idx / len(loader):.0f}%)]\t'
-                          f'mean weights: {pred_weights.mean():.3f}\t'
+                          f'mean weights: {pred_weights.sum():.3f}\t'
                           f'loss: {loss.item():.6f}')
     print(f"=================> {fold} epoch: {epoch}", flush=False)
     for name, record in records.items():
@@ -336,7 +335,7 @@ def main(test_source, train_size, n_jobs,
     loss_model = ModelLoss(model, loss_fns)
 
     if not test_only:
-        optimizer = Adam(loss_model.parameters(), lr=lr)
+        optimizer = Adam(loss_model.parameters(), lr=lr, amsgrad=True)
     else:
         n_epochs = 1
         optimizer = None
@@ -352,13 +351,13 @@ def main(test_source, train_size, n_jobs,
             train_eval_loop(loss_model, loaders['train'], 'train', epoch,
                             optimizer=optimizer,
                             train=True, output_dir=output_dir)
-        # train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
-        #                 output_dir=output_dir)
-        # train_eval_loop(loss_model, loaders['test'], 'test', epoch,
-        #                 output_dir=output_dir)
-        # if not test_only:
-        #     save_checkpoint(model, optimizer,
-        #                     join(output_dir, f'checkpoint_{epoch}.pkl'))
+        train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
+                        output_dir=output_dir)
+        train_eval_loop(loss_model, loaders['test'], 'test', epoch,
+                        output_dir=output_dir)
+        if not test_only:
+            save_checkpoint(model, optimizer,
+                            join(output_dir, f'checkpoint_{epoch}.pkl'))
 
 
 if __name__ == '__main__':
