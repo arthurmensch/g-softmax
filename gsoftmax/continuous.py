@@ -327,5 +327,5 @@ class DeepLoco(nn.Module):
         x = self.resnet(x)
         position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads, self.dimension))
         weights = self.weight_fc(x)
-        weights = torch.sigmoid(weights / 1000)
+        # weights = torch.sigmoid(weights / 1000)
         return position, weights
