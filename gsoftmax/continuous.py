@@ -1,11 +1,10 @@
-import math
+import copy
 from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-import numpy as np
+from torch.nn import Parameter
 
 
 def duality_gap(potential, new_potential):
@@ -95,20 +94,18 @@ class MeasureDistance(nn.Module):
             outer = torch.einsum('bld,bkd->blk', x, y)
             norm_x = torch.sum(x ** 2, dim=2)
             norm_y = torch.sum(y ** 2, dim=2)
-            divider = 2 if self.kernel == 'gaussian' else 1
-            distance = ((norm_x[:, :, None] + norm_y[:, None, :] - 2 * outer) /
-                        (divider * self.sigma ** 2))
+            distance = ((norm_x[:, :, None] + norm_y[:, None, :]
+                         - 2 * outer))
             distance.clamp_(min=0.)
 
-            if self.kernel in ['energy', 'laplacian']:
-                distance = torch.sqrt(distance + 1e-8)
-            distance = - distance
-            if self.kernel in ['energy', 'energy_squared']:
-                return distance
-            elif self.kernel in ['laplacian', 'gaussian']:
-                multiplier = 2 if self.kernel == 'laplacian' else math.sqrt(
-                    2 * math.pi)
-                return torch.exp(distance) / multiplier / self.sigma
+            if self.kernel == 'energy':
+                return - torch.sqrt(distance + 1e-8)
+            elif self.kernel == 'energy_squared':
+                return - distance
+            elif self.kernel == 'laplacian':
+                return torch.exp(- torch.sqrt(distance + 1e-8) / self.sigma)
+            elif self.kernel == 'gaussian':
+                return torch.exp(- distance / 2 / self.sigma ** 2)
             raise ValueError(f'Wrong kernel argument for'
                              f' distance_type==2, got `{self.kernel}`')
         elif self.distance_type == 1:
@@ -151,6 +148,7 @@ class MeasureDistance(nn.Module):
 
         if b is not None:
             weights['y'] = detach_weight(b)
+
         if y is not None:
             pos['y'] = y
 
@@ -239,7 +237,6 @@ class MeasureDistance(nn.Module):
 
     def forward(self, x: torch.tensor, a: torch.tensor,
                 y: torch.tensor, b: torch.tensor):
-
         if not self.coupled:
             f, fe = self.potential(x, a, y)
             g, ge = self.potential(y, b, x)
@@ -248,35 +245,11 @@ class MeasureDistance(nn.Module):
         res = 0
         if 'right' in self.terms:
             diff = ge - f
-            diff[a == 0] = 0
             res += torch.sum(diff * a, dim=1)
         if 'left' in self.terms:
             diff = fe - g
-            diff[b == 0] = 0
             res += torch.sum(diff * b, dim=1)
 
-        # g1 = np.linspace(0, 1, 100)
-        # g2 = np.linspace(0, 1, 100)
-        # grid = np.meshgrid(g1, g2)
-        # grid = np.concatenate((grid[0][:, :, None], grid[1][:, :, None]),
-        #                       axis=2)
-        # grid = grid.reshape((-1, 2))
-        # grid = torch.from_numpy(grid).float()[None, :]
-        #
-        # fe = self.extrapolate(potential=f, target_pos=grid, pos=x,
-        #                       weight=a).detach().numpy()
-        # ge = self.extrapolate(potential=g, target_pos=grid, pos=y,
-        #                       weight=b).detach().numpy()
-        # import matplotlib.pyplot as plt
-        # fig, axes = plt.subplots(2, 2)
-        # axes[0, 0].scatter(x.detach()[0, :, 0], x.detach()[0, :, 1])
-        # axes[0, 1].contour(g1, g2, fe[0].reshape(len(g1), len(g2)), 50)
-        # axes[1, 0].scatter(y.detach()[0, :, 0], y.detach()[0, :, 1])
-        # axes[1, 1].contour(g1, g2, ge[0].reshape(len(g1), len(g2)), 50)
-        # for ax in axes.ravel():
-        #     ax.set_xlim([0, 1])
-        #     ax.set_ylim([0, 1])
-        # plt.show()
         if self.reduction == 'mean':
             res = res.mean()
         elif self.reduction == 'sum':
@@ -296,76 +269,77 @@ class ResLinear(nn.Module):
         return F.relu(self.bn2(self.l2(F.relu(self.bn1(self.l1(x))))) + x)
 
 
-class DeepLoco(nn.Module):
-    def __init__(self, beads=10, dimension=3):
+class Flatten(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(1, 16, 5, padding=2),
-            # nn.BatchNorm2d(16),
-            nn.ReLU(True),
-            nn.Conv2d(16, 16, 5, padding=2),
-            # nn.BatchNorm2d(16),
-            nn.ReLU(True),
-            nn.Conv2d(16, 64, 2, stride=2),
-            # nn.BatchNorm2d(64),
-            nn.ReLU(True),
-            nn.Conv2d(64, 64, 3, padding=1),
-            # nn.BatchNorm2d(64),
-            nn.ReLU(True),
-            nn.Conv2d(64, 256, 2, stride=2),
-            # nn.BatchNorm2d(256),
-            nn.ReLU(True),
-            nn.Conv2d(256, 256, 3, padding=1),
-            # nn.BatchNorm2d(256),
-            nn.ReLU(True),
-            nn.Conv2d(256, 256, 3, padding=1),
-            # nn.BatchNorm2d(256),
-            nn.ReLU(True),
-            nn.Conv2d(256, 256, 4, stride=4),
-            # nn.BatchNorm2d(256),
-            nn.ReLU(True),
-        )
 
-        self.weight_fc = nn.Sequential(
-            nn.Linear(4096, 2048),
-            # nn.BatchNorm1d(2048),
-            nn.ReLU(True),
-            nn.Linear(2048, 2048),
-            # nn.BatchNorm1d(2048),
-            nn.ReLU(True),
-            nn.Linear(2048, 2048),
-            # nn.BatchNorm1d(2048),
-            nn.ReLU(True),
-            nn.Linear(2048, 2048),
-            # nn.BatchNorm1d(2048),
-            nn.ReLU(True),
-            nn.Linear(2048, beads)
-        )
+    def forward(self, x):
+        return x.view(x.shape[0], -1)
+
+
+class DeepLoco(nn.Module):
+    def __init__(self, beads=10, dimension=3, batch_norm=False):
+        super().__init__()
+        shapes = [[1, 16, 5, 2, 1],
+                  [16, 16, 5, 2, 1],
+                  [16, 64, 2, 0, 2],
+                  [64, 64, 3, 1, 1],
+                  [64, 256, 2, 0, 2],
+                  [256, 256, 3, 1, 1],
+                  [256, 256, 3, 1, 1],
+                  [256, 256, 4, 0, 4]
+                  ]
+        seq = []
+        for i, o, k, p, s in shapes:
+            seq.append(nn.Conv2d(i, o, k, padding=p, stride=s))
+            if batch_norm:
+                seq.append(nn.BatchNorm2d(o))
+            seq.append(nn.ReLU(True))
+
+        seq.append(Flatten(),)
+
+        shapes = [(4096, 2048),
+                  (2048, 2048),
+                  (2048, 2048),
+                  (2048, 2048)]
+
+        flat_seq = []
+        for i, o in shapes:
+            flat_seq.append(nn.Linear(i, o))
+            if batch_norm:
+                flat_seq.append(nn.BatchNorm1d(o))
+            flat_seq.append(nn.ReLU(True))
+
+        self.barebone = nn.Sequential(*seq, *flat_seq)
 
         self.pos_fc = nn.Sequential(
-            nn.Linear(4096, 2048),
-            # nn.BatchNorm1d(2048),
-            nn.ReLU(True),
-            nn.Linear(2048, 2048),
-            # nn.BatchNorm1d(2048),
-            nn.ReLU(True),
-            nn.Linear(2048, 2048),
-            # nn.BatchNorm1d(2048),
-            nn.ReLU(True),
-            nn.Linear(2048, 2048),
-            # nn.BatchNorm1d(2048),
-            nn.ReLU(True),
-            nn.Linear(2048, beads * dimension)
-        )
+                                    nn.Linear(2048, beads * dimension))
+
+        self.weight_fc = nn.Sequential(
+                                    nn.Linear(2048, beads))
 
         self.dimension = dimension
         self.beads = beads
 
+        self.noisy_relu = NoisyReLU(beads)
+
     def forward(self, x):
-        x = self.conv(x)
-        x = x.reshape(-1, 4096)
-        position = torch.sigmoid(self.pos_fc(x).reshape(-1, self.beads,
-                                                        self.dimension))
+        x = self.barebone(x)
+        position = torch.sigmoid(self.pos_fc(x).view(-1, self.beads,
+                                                     self.dimension) * 100)
         weights = self.weight_fc(x)
-        weights = torch.relu(weights)
+        weights = F.relu(weights)
         return position, weights
+
+
+class NoisyReLU(nn.Module):
+    def __init__(self, in_features):
+        super().__init__()
+        self.var = Parameter(torch.ones(in_features) / 100)
+
+    def forward(self, input):
+        if self.train:
+            eps = torch.randn_like(input)
+            return F.relu(F.relu(input) + eps * self.var[None, :])
+        else:
+            return F.relu(input)

@@ -30,7 +30,7 @@ def system():
     checkpoint = None
     log_interval = 100
 
-    n_jobs = 4
+    n_jobs = 8
 
     test_only = False
 
@@ -42,7 +42,7 @@ def base():
     dimension = 3
 
     loss = 'sinkhorn'
-    coupled = False
+    coupled = True
     terms = 'symmetric'
     kernel = 'energy_squared'
 
@@ -51,14 +51,16 @@ def base():
     eval_size = 2048
     test_size = None
 
+    batch_norm = True
+
     distance_type = 2
 
-    sigmas = [0.3]
-    epsilon = 1
-    rho = 1e-1
+    sigmas = [0.1]
+    epsilon = 0.1
+    rho = 0.1
     lr = 1e-3
 
-    n_epochs = 100
+    n_epochs = 1000
 
 
 @exp.named_config
@@ -69,13 +71,16 @@ def test_only():
 
 
 class ModelLoss(nn.Module):
-    def __init__(self, model, loss_fns):
+    def __init__(self, model, loss_fns, zero=1e-12):
         super().__init__()
         self.model = model
         self.loss_fns = nn.ModuleList(loss_fns)
+        self.zero = zero
 
     def forward(self, imgs, positions, weights):
+        weights = torch.clamp(weights, min=self.zero)
         pred_positions, pred_weights = self.model(imgs)
+        pred_weights = torch.clamp(pred_weights, min=self.zero)
         loss = 0
         for loss_fn in self.loss_fns:
             loss += loss_fn(pred_positions, pred_weights, positions, weights)
@@ -127,7 +132,7 @@ def plot_pred_ground_truth(pred_positions, pred_weights,
 
 
 def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
-            reduction='mean', threshold=50):
+            reduction='mean', threshold=50, zero=1e-12):
     dim = pred_positions.shape[2]
     jaccards = []
     rmses_xy = []
@@ -145,9 +150,9 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
 
     for ppos, pweight, pos, weight in zip(pred_positions, pred_weights,
                                           positions, weights):
-        ppos = ppos[pweight > 0]
+        ppos = ppos[pweight > zero]
 
-        pos = pos[weight > 0]
+        pos = pos[weight > zero]
 
         if len(pos) == 0 or len(ppos) == 0:
             jaccard = 0.
@@ -261,7 +266,7 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
                     print(f'{fold} epoch: {epoch} '
                           f'[{batch_idx * batch_size}/{len(loader.dataset)} '
                           f'({100. * batch_idx / len(loader):.0f}%)]\t'
-                          f'mean weights: {pred_weights.sum():.3f}\t'
+                          f'mean weights: {pred_weights.sum() / batch_size:.3f}\t'
                           f'loss: {loss.item():.6f}')
     print(f"=================> {fold} epoch: {epoch}", flush=False)
     for name, record in records.items():
@@ -275,6 +280,7 @@ def main(test_source, train_size, n_jobs,
          eval_size, batch_size, n_epochs, checkpoint,
          distance_type, test_only, dimension, test_size,
          loss, coupled, terms, kernel, sigmas, epsilon, rho, lr,
+         batch_norm,
          modality, device, _seed, _run):
     output_dir = join(base_dir, str(_run._id), 'artifacts')
     if not os.path.exists(output_dir):
@@ -318,7 +324,7 @@ def main(test_source, train_size, n_jobs,
 
     plot_example(datasets, output_dir=output_dir)
 
-    model = DeepLoco(beads=50, dimension=dimension)
+    model = DeepLoco(beads=300, dimension=dimension, batch_norm=batch_norm)
     loss_fns = []
     for sigma in sigmas:
         loss_fns.append(MeasureDistance(loss=loss,
@@ -328,7 +334,7 @@ def main(test_source, train_size, n_jobs,
                                         kernel=kernel,
                                         max_iter=100,
                                         sigma=sigma,
-                                        graph_surgery='',
+                                        graph_surgery='loop',
                                         verbose=False,
                                         epsilon=epsilon, rho=rho,
                                         reduction='mean'))
@@ -351,10 +357,10 @@ def main(test_source, train_size, n_jobs,
             train_eval_loop(loss_model, loaders['train'], 'train', epoch,
                             optimizer=optimizer,
                             train=True, output_dir=output_dir)
-        train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
-                        output_dir=output_dir)
-        train_eval_loop(loss_model, loaders['test'], 'test', epoch,
-                        output_dir=output_dir)
+        # train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
+        #                 output_dir=output_dir)
+        # train_eval_loop(loss_model, loaders['test'], 'test', epoch,
+        #                 output_dir=output_dir)
         if not test_only:
             save_checkpoint(model, optimizer,
                             join(output_dir, f'checkpoint_{epoch}.pkl'))
