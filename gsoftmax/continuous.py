@@ -232,13 +232,6 @@ class MeasureDistance(nn.Module):
         return - epsilon * torch.logsumexp(kernel / epsilon + sum[:, None, :],
                                            dim=2)
 
-    def potential_transform(self, f):
-        if self.rho is None or self.loss == 'mmd':
-            return f
-        else:
-            # scale * rho
-            return - (self.rho + self.epsilon / 2) * (- f / self.rho).exp()
-
     def forward(self, x: torch.tensor, a: torch.tensor,
                 y: torch.tensor, b: torch.tensor):
         if not self.coupled:
