@@ -4,7 +4,7 @@ from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import Parameter
+from torchvision.models.resnet import BasicBlock
 
 
 def duality_gap(potential, new_potential):
@@ -15,9 +15,11 @@ def duality_gap(potential, new_potential):
     :param new_potential
     :return:
     """
-    diff = potential - new_potential
-    return (torch.max(diff, dim=1)[0] - torch.min(diff, dim=1)[
-        0]).mean().item()
+    with torch.no_grad():
+        diff = potential - new_potential
+        res = torch.max(diff, dim=1)[0] - torch.min(diff, dim=1)[0]
+        res[torch.isnan(res)] = 0
+        return res.mean().item()
 
 
 def bmm(x, y):
@@ -36,7 +38,7 @@ class MeasureDistance(nn.Module):
                  terms: str = 'symmetric', epsilon: float = 1., rho=None,
                  tol: float = 1e-6, max_iter: int = 10,
                  kernel: str = 'energy_squared', distance_type: int = 2,
-                 graph_surgery: str = 'loop',
+                 graph_surgery: str = 'loop+weight',
                  sigma: float = 1, verbose: bool = False,
                  reduction='mean'):
         """
@@ -175,6 +177,7 @@ class MeasureDistance(nn.Module):
         for dir in running:
             potentials[dir] = torch.zeros_like(weights[dir[0]])
 
+        scale = 1 if self.rho is None else 1 + self.epsilon / self.rho
         n_iter = 0
         with torch.no_grad() if 'loop' in self.graph_surgery else nullcontext():
             while running and n_iter < self.max_iter:
@@ -182,7 +185,7 @@ class MeasureDistance(nn.Module):
                     new_potentials[dir] = self.extrapolate(
                         potential=potentials[dir[::-1]],
                         weight=weights[dir[1]], epsilon=self.epsilon,
-                        kernel=kernels[dir])
+                        kernel=kernels[dir]) / scale
                 for dir in running:
                     new_potentials[dir] += potentials[dir]
                     new_potentials[dir] /= 2
@@ -203,8 +206,9 @@ class MeasureDistance(nn.Module):
                 potential=potentials[dir[::-1]],
                 weight=weights[dir[1]],
                 epsilon=self.epsilon,
-                kernel=kernels[dir])
-        new_potentials = {dir: self.potential_transform(potential)
+                kernel=kernels[dir]) / scale
+        scale = 1 if self.rho is None else 1 + self.epsilon / self.rho / 2
+        new_potentials = {dir: phi_transform(potential, self.rho) * scale
                           for dir, potential in new_potentials.items()}
         if not self.coupled:
             if y is not None:
@@ -223,10 +227,10 @@ class MeasureDistance(nn.Module):
             return - bmm(kernel, weight) / 2
         if epsilon is None:
             epsilon = self.epsilon
-        scale = 1 if self.rho is None else 1 / (1 + self.epsilon / self.rho)
-        return - epsilon * scale * torch.logsumexp(
-            (kernel + potential[:, None, :]) / epsilon
-            + weight[:, None, :], dim=2)
+        potential[weight == - float('inf')] = 0
+        sum = potential / epsilon + weight
+        return - epsilon * torch.logsumexp(kernel / epsilon + sum[:, None, :],
+                                           dim=2)
 
     def potential_transform(self, f):
         if self.rho is None or self.loss == 'mmd':
@@ -242,6 +246,7 @@ class MeasureDistance(nn.Module):
             g, ge = self.potential(y, b, x)
         else:
             f, fe, g, ge = self.potential(x, a, y, b)
+            # fe is the usual g, ge is the usual f, f and g are symmetric pots
         res = 0
         if 'right' in self.terms:
             diff = ge - f
@@ -257,6 +262,48 @@ class MeasureDistance(nn.Module):
         return res
 
 
+def safe_dot(a, f):
+    return SafeDot.apply(a, f)
+
+
+class SafeDot(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, a, f):
+        ctx.save_for_backward(a, f)
+        f = f.clone()
+        f[a == 0] = 0
+        return torch.sum(a * f, dim=1)
+
+    @staticmethod
+    def backward(ctx, grad):
+        a, f = ctx.saved_tensors
+
+        return f * grad[:, None], a * grad[:, None]
+
+
+class PhiTransform(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, f, rho):
+        g = torch.zeros_like(f)
+        mask = f < 1e8
+        g[mask] = (- f[mask] / rho).exp()
+        ctx.save_for_backward(g)
+        return - rho * (g - 1)
+
+    @staticmethod
+    def backward(ctx, grad):
+        g,  = ctx.saved_tensors
+        g[grad == 0] = 0
+        return g * grad, None
+
+
+def phi_transform(f, rho):
+    if rho is None:
+        return f
+    else:
+        return - rho * ((- f / rho).exp() - 1)
+
+
 class ResLinear(nn.Module):
     def __init__(self, n_features, bias=True):
         super().__init__()
@@ -266,7 +313,7 @@ class ResLinear(nn.Module):
         self.bn2 = nn.BatchNorm1d(n_features)
 
     def forward(self, x):
-        return F.relu(self.bn2(self.l2(F.relu(self.bn1(self.l1(x))))) + x)
+        return self.bn2(self.l2(F.relu(self.bn1(self.l1(x))))) + x
 
 
 class Flatten(nn.Module):
@@ -277,69 +324,141 @@ class Flatten(nn.Module):
         return x.view(x.shape[0], -1)
 
 
-class DeepLoco(nn.Module):
-    def __init__(self, beads=10, dimension=3, batch_norm=False):
+class ResNet(nn.Module):
+
+    def __init__(self, block, layers, num_classes=1000):
+        self.inplanes = 64
+        super(ResNet, self).__init__()
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=5, stride=1, padding=2,
+                               bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+        self.avgpool = nn.AvgPool2d(8, stride=1)
+        self.fc = nn.Linear(512 * block.expansion, num_classes)
+
+    def _make_layer(self, block, planes, blocks, stride=1):
+        downsample = None
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion),
+            )
+
+        layers = []
+        layers.append(block(self.inplanes, planes, stride, downsample))
+        self.inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes))
+
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = F.relu(x, inplace=True)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+
+        return x
+
+
+def resnet18():
+    return ResNet(BasicBlock, [2, 2, 2, 2])
+
+
+class CNNPos(nn.Module):
+    def __init__(self, architecture='dcgan',
+                 beads=10, dimension=3, batch_norm=False, residual_fc=True):
         super().__init__()
-        shapes = [[1, 16, 5, 2, 1],
-                  [16, 16, 5, 2, 1],
-                  [16, 64, 2, 0, 2],
-                  [64, 64, 3, 1, 1],
-                  [64, 256, 2, 0, 2],
-                  [256, 256, 3, 1, 1],
-                  [256, 256, 3, 1, 1],
-                  [256, 256, 4, 0, 4]
-                  ]
-        seq = []
-        for i, o, k, p, s in shapes:
-            seq.append(nn.Conv2d(i, o, k, padding=p, stride=s))
-            if batch_norm:
-                seq.append(nn.BatchNorm2d(o))
-            seq.append(nn.ReLU(True))
 
-        seq.append(Flatten(),)
+        if architecture == 'deep_loco':
+            shapes = [[1, 16, 5, 2, 1],
+                      [16, 16, 5, 2, 1],
+                      [16, 64, 2, 0, 2],
+                      [64, 64, 3, 1, 1],
+                      [64, 256, 2, 0, 2],
+                      [256, 256, 3, 1, 1],
+                      [256, 256, 3, 1, 1],
+                      [256, 256, 4, 0, 4]
+                      ]
+            seq = []
+            for i, o, k, p, s in shapes:
+                seq.append(nn.Conv2d(i, o, k, padding=p, stride=s))
+                if batch_norm:
+                    seq.append(nn.BatchNorm2d(o))
+                seq.append(nn.ReLU(True))
 
-        shapes = [(4096, 2048),
-                  (2048, 2048),
-                  (2048, 2048),
-                  (2048, 2048)]
+            seq.append(Flatten(), )
+            self.barebone = nn.Sequential(*seq, )
+            state_size = 4096
+        elif architecture == 'dcgan':
+            nc = 1
+            ndf = 64
+            self.barebone = nn.Sequential(
+                nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),
+                nn.LeakyReLU(0.2, inplace=True),
+                # state size. (ndf) x 32 x 32
+                nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(ndf * 2),
+                nn.LeakyReLU(0.2, inplace=True),
+                # state size. (ndf*2) x 16 x 16
+                nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(ndf * 4),
+                nn.LeakyReLU(0.2, inplace=True),
+                # state size. (ndf*4) x 8 x 8
+                nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(ndf * 8),
+                nn.LeakyReLU(0.2, inplace=True),
+                Flatten()
+                # state size. (ndf*8) x 4 x 4
+            )
+            state_size = ndf * 8 * 4 * 4
+        elif architecture == 'resnet':
+            self.barebone = nn.Sequential(resnet18())
+            state_size = 1000
 
-        flat_seq = []
-        for i, o in shapes:
-            flat_seq.append(nn.Linear(i, o))
-            if batch_norm:
-                flat_seq.append(nn.BatchNorm1d(o))
-            flat_seq.append(nn.ReLU(True))
+        if residual_fc:
+            flat_seq = [nn.Linear(state_size, 2048),
+                        ResLinear(2048, 2048),
+                        ResLinear(2048, 2048),
+                        ResLinear(2048, 2048)]
+        else:
+            shapes = [(state_size, 2048),
+                      ResLinear(2048, 2048),
+                      ResLinear(2048, 2048),
+                      ResLinear(2048, 2048),
+                      ]
+            flat_seq = []
+            for i, o in shapes:
+                flat_seq.append(nn.Linear(i, o))
+                if batch_norm:
+                    flat_seq.append(nn.BatchNorm1d(o))
+                flat_seq.append(nn.ReLU(True))
 
-        self.barebone = nn.Sequential(*seq, *flat_seq)
+        self.pos_fc = nn.Sequential(*flat_seq,
+                                    nn.Linear(2048, beads * dimension, ))
 
-        self.pos_fc = nn.Sequential(
-                                    nn.Linear(2048, beads * dimension))
-
-        self.weight_fc = nn.Sequential(
-                                    nn.Linear(2048, beads))
+        self.weight_fc = nn.Sequential(*copy.deepcopy(flat_seq),
+                                       nn.Linear(2048, beads))
 
         self.dimension = dimension
         self.beads = beads
 
-        self.noisy_relu = NoisyReLU(beads)
-
     def forward(self, x):
         x = self.barebone(x)
         position = torch.sigmoid(self.pos_fc(x).view(-1, self.beads,
-                                                     self.dimension) * 100)
+                                                     self.dimension) * 5)
         weights = self.weight_fc(x)
         weights = F.relu(weights)
         return position, weights
-
-
-class NoisyReLU(nn.Module):
-    def __init__(self, in_features):
-        super().__init__()
-        self.var = Parameter(torch.ones(in_features) / 100)
-
-    def forward(self, input):
-        if self.train:
-            eps = torch.randn_like(input)
-            return F.relu(F.relu(input) + eps * self.var[None, :])
-        else:
-            return F.relu(input)

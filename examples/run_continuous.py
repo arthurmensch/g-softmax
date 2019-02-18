@@ -1,10 +1,10 @@
 import torch
-from gsoftmax.continuous import MeasureDistance, DeepLoco
+from gsoftmax.continuous import MeasureDistance, CNNPos
 
 def run_deep_loco():
     x = torch.zeros(2, 1, 64, 64)
 
-    model = DeepLoco()
+    model = CNNPos()
     potential = MeasureDistance(verbose=True)
     pos, log_weights = model(x)
     f = potential(pos, log_weights)

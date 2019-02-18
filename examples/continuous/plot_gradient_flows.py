@@ -15,7 +15,7 @@ flow = 'lifted'
 
 if not from_grid:
     x, a = draw_samples("data/density_a.png", 190, random_state=0)
-    a *= 2
+    a[:] = 0
 else:
     g1 = np.linspace(0, 1, 20)
     g2 = np.linspace(0, 1, 20)
@@ -36,14 +36,14 @@ b = b[None, :]
 y = y[None, :]
 
 
-sinkhorn_divergence = MeasureDistance(loss='mmd',
+sinkhorn_divergence = MeasureDistance(loss='sinkhorn',
                                       coupled=True,
                                       terms='symmetric',
-                                      distance_type=1,
-                                      kernel='laplacian',
+                                      distance_type=2,
+                                      kernel='energy_squared',
                                       max_iter=100,
-                                      rho=1,
-                                      sigma=1, graph_surgery='',
+                                      rho=1e-1,
+                                      sigma=1, graph_surgery='pos+weight+loop',
                                       verbose=False,
                                       epsilon=1e-3)
 
@@ -64,18 +64,20 @@ for i, t in enumerate(times):  # Euler scheme ===============
         x.grad.zero_()
     loss.backward()
     if flow == 'wasserstein':
-        g = x.grad * lr / a[:, :, None]
+        gx = x.grad / a[:, :, None]
+        ga = torch.zeros_like(a)
     else:
-        g = x.grad * lr / a.shape[1]
-    g[~torch.isfinite(g)] = 0
+        gx = x.grad / len(a)
+        gx = gx.clamp(min=-1, max=1)
+        ga = a.grad / len(a)
+        ga = ga.clamp(min=-1e-2, max=1e-2)
     info = f't = {t:.3f}, loss {loss.item():.4f}'
-    print(info)
     if i in display_its:  # display
         ax = plt.subplot(2, 3, k)
         k = k + 1
         display_samples(ax, y[0], b[0], [(.55, .55, .95)])
         display_samples(ax, x.detach()[0], a.detach()[0],
-                        [(.95, .55, .55)], g[0],
+                        [(.95, .55, .55)], gx[0],
                         width=.25 / len(x[0]), scale=5)
 
         ax.set_title(info)
@@ -85,10 +87,8 @@ for i, t in enumerate(times):  # Euler scheme ===============
         plt.yticks([], [])
         ax.set_aspect('equal', adjustable='box')
 
-    x.data -= g
-    if flow == 'lifted':
-        g = a.grad * lr / a.shape[1]
-        g[~torch.isfinite(g)] = 0
-        a.data -= g
-        a.data = a.data.clamp_(min=0.)
+    x.data -= gx * lr
+    a.data -= ga * lr
+    a.data = a.data.clamp_(min=0.)
+
 plt.show()

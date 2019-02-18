@@ -5,7 +5,7 @@ from os.path import join, expanduser
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from gsoftmax.continuous import MeasureDistance, DeepLoco
+from gsoftmax.continuous import MeasureDistance, CNNPos
 from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
 from sacred import Experiment
 from sacred import SETTINGS
@@ -25,7 +25,7 @@ exp.observers.append(FileStorageObserver.create(base_dir))
 
 @exp.config
 def system():
-    device = 'cpu'
+    device = 0
     seed = 100
     checkpoint = None
     log_interval = 100
@@ -33,6 +33,7 @@ def system():
     n_jobs = 8
 
     test_only = False
+    train_only = False
 
 
 @exp.config
@@ -61,6 +62,16 @@ def base():
     lr = 1e-3
 
     n_epochs = 1000
+
+
+@exp.named_config
+def single_batch():
+    device = 0
+    batch_size = 32
+    train_size = int(32)
+    eval_size = 32
+    test_size = 32
+    train_only = True
 
 
 @exp.named_config
@@ -280,7 +291,7 @@ def main(test_source, train_size, n_jobs,
          eval_size, batch_size, n_epochs, checkpoint,
          distance_type, test_only, dimension, test_size,
          loss, coupled, terms, kernel, sigmas, epsilon, rho, lr,
-         batch_norm,
+         batch_norm, train_only,
          modality, device, _seed, _run):
     output_dir = join(base_dir, str(_run._id), 'artifacts')
     if not os.path.exists(output_dir):
@@ -324,7 +335,8 @@ def main(test_source, train_size, n_jobs,
 
     plot_example(datasets, output_dir=output_dir)
 
-    model = DeepLoco(beads=300, dimension=dimension, batch_norm=batch_norm)
+    model = CNNPos(beads=100, dimension=dimension, batch_norm=batch_norm,
+                   architecture='deep_loco')
     loss_fns = []
     for sigma in sigmas:
         loss_fns.append(MeasureDistance(loss=loss,
@@ -352,18 +364,18 @@ def main(test_source, train_size, n_jobs,
     loss_model.to(device)
 
     for epoch in range(n_epochs):
-        np.random.seed(0)
+        np.random.seed()
+        if not train_only:
+            train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
+                            output_dir=output_dir)
+            train_eval_loop(loss_model, loaders['test'], 'test', epoch,
+                            output_dir=output_dir)
         if not test_only:
             train_eval_loop(loss_model, loaders['train'], 'train', epoch,
                             optimizer=optimizer,
                             train=True, output_dir=output_dir)
-        # train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
-        #                 output_dir=output_dir)
-        # train_eval_loop(loss_model, loaders['test'], 'test', epoch,
-        #                 output_dir=output_dir)
-        if not test_only:
             save_checkpoint(model, optimizer,
-                            join(output_dir, f'checkpoint_{epoch}.pkl'))
+                            join(output_dir, f'checkpoint.pkl'))
 
 
 if __name__ == '__main__':
