@@ -173,7 +173,6 @@ class MeasureDistance(nn.Module):
                     potentials['yy'], potentials['xy'])
 
         weights = {dir: torch.log(weight) for dir, weight in weights.items()}
-
         for dir in running:
             potentials[dir] = torch.zeros_like(weights[dir[0]])
 
@@ -227,10 +226,11 @@ class MeasureDistance(nn.Module):
             return - bmm(kernel, weight) / 2
         if epsilon is None:
             epsilon = self.epsilon
-        potential[weight == - float('inf')] = 0
+        potential = masker(potential, weight == -float('inf'), -float('inf'))
         sum = potential / epsilon + weight
-        return - epsilon * torch.logsumexp(kernel / epsilon + sum[:, None, :],
-                                           dim=2)
+        operand = kernel / epsilon + sum[:, None, :]
+        lse = - epsilon * safe_lse(operand)
+        return lse
 
     def forward(self, x: torch.tensor, a: torch.tensor,
                 y: torch.tensor, b: torch.tensor):
@@ -242,11 +242,13 @@ class MeasureDistance(nn.Module):
             # fe is the usual g, ge is the usual f, f and g are symmetric pots
         res = 0
         if 'right' in self.terms:
-            diff = ge - f
-            res += torch.sum(diff * a, dim=1)
+            ge = masker(ge, a == 0, 0)
+            f = masker(f, a == 0, 0)
+            res += torch.sum(ge * a, dim=1) - torch.sum(f * a, dim=1)
         if 'left' in self.terms:
-            diff = fe - g
-            res += torch.sum(diff * b, dim=1)
+            fe = masker(fe, b == 0, 0)
+            g = masker(g, b == 0, 0)
+            res += torch.sum(fe * b, dim=1) - torch.sum(g * b, dim=1)
 
         if self.reduction == 'mean':
             res = res.mean()
@@ -255,46 +257,48 @@ class MeasureDistance(nn.Module):
         return res
 
 
-def safe_dot(a, f):
-    return SafeDot.apply(a, f)
+def safe_lse(operand):
+    return SafeLSE.apply(operand)
 
 
-class SafeDot(torch.autograd.Function):
+class SafeLSE(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, a, f):
-        ctx.save_for_backward(a, f)
-        f = f.clone()
-        f[a == 0] = 0
-        return torch.sum(a * f, dim=1)
+    def forward(ctx, operand):
+        ctx.save_for_backward(operand)
+        return torch.logsumexp(operand, dim=2)
 
     @staticmethod
-    def backward(ctx, grad):
-        a, f = ctx.saved_tensors
+    def backward(ctx, grad_output):
+        operand,  = ctx.saved_tensors
+        mask = torch.all(torch.isinf(operand), dim=2) ^ 1
+        s = torch.ones_like(operand) / operand.shape[2]
+        s[mask] = torch.softmax(s[mask], dim=1)
+        return s * grad_output[:, :, None]
 
-        return f * grad[:, None], a * grad[:, None]
+
+def masker(x, mask, target):
+    return Masker.apply(x, mask, target)
 
 
-class PhiTransform(torch.autograd.Function):
+class Masker(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, f, rho):
-        g = torch.zeros_like(f)
-        mask = f < 1e8
-        g[mask] = (- f[mask] / rho).exp()
-        ctx.save_for_backward(g)
-        return - rho * (g - 1)
+    def forward(ctx, x, mask, target):
+        x[mask] = target
+        return x
 
     @staticmethod
-    def backward(ctx, grad):
-        g,  = ctx.saved_tensors
-        g[grad == 0] = 0
-        return g * grad, None
+    def backward(ctx, grad_output):
+        return grad_output, None, None
 
 
 def phi_transform(f, rho):
     if rho is None:
         return f
     else:
-        return - rho * ((- f / rho).exp() - 1)
+        f = f.clone()
+        mask = torch.isfinite(f)
+        f[mask] = - rho * ((- f[mask] / rho).exp() - 1)
+        return f
 
 
 class ResLinear(nn.Module):
