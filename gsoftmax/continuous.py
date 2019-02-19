@@ -228,7 +228,7 @@ class MeasureDistance(nn.Module):
         potential = masker(potential, weight == -float('inf'), -float('inf'))
         sum = potential / epsilon + weight
         operand = kernel / epsilon + sum[:, None, :]
-        lse = - epsilon * safe_lse(operand)
+        lse = - epsilon * torch.logsumexp(operand, dim=2)
         return lse
 
     def forward(self, x: torch.tensor, a: torch.tensor,
@@ -288,6 +288,23 @@ class Masker(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         return grad_output, None, None
+
+
+def mass_scaler(x, a):
+    return MassScaler.apply(x, a)
+
+
+class MassScaler(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, a):
+        ctx.save_for_backward(a)
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        a, = ctx.saved_tensors
+        grad_output = grad_output * 1
+        return grad_output, None
 
 
 def phi_transform(f, rho):
@@ -374,7 +391,7 @@ def resnet18():
 
 
 class CNNPos(nn.Module):
-    def __init__(self, architecture='dcgan',
+    def __init__(self, architecture='dcgan', zero=1e-12,
                  beads=10, dimension=3, batch_norm=False, residual_fc=True):
         super().__init__()
 
@@ -450,11 +467,12 @@ class CNNPos(nn.Module):
 
         self.dimension = dimension
         self.beads = beads
+        self.zero = zero
 
     def forward(self, x):
         x = self.barebone(x)
         position = torch.sigmoid(self.pos_fc(x).view(-1, self.beads,
                                                      self.dimension) * 5)
         weights = self.weight_fc(x)
-        weights = F.relu(weights)
+        weights = self.zero + F.relu(weights - self.zero)
         return position, weights

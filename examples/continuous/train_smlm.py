@@ -5,6 +5,8 @@ from os.path import join, expanduser
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from torch.nn.utils import clip_grad_norm_
+
 from gsoftmax.continuous import MeasureDistance, CNNPos
 from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
 from sacred import Experiment
@@ -15,6 +17,8 @@ from sklearn.metrics import pairwise_distances
 from torch import nn
 from torch.optim import Adam
 from torch.utils.data import DataLoader
+
+import torch.nn.functional as F
 
 SETTINGS.HOST_INFO.INCLUDE_GPU_INFO = False
 
@@ -59,18 +63,19 @@ def base():
     sigmas = [0.1]
     epsilon = 0.1
     rho = 0.1
-    lr = 1e-3
+    lr = 1e-4
+    zero = 1e-7
 
     n_epochs = 1000
 
 
 @exp.named_config
 def single_batch():
-    device = 0
-    batch_size = 32
-    train_size = int(32)
-    eval_size = 32
-    test_size = 32
+    device = 'cpu'
+    batch_size = 4
+    train_size = int(4)
+    eval_size = 4
+    test_size = 4
     train_only = True
 
 
@@ -82,16 +87,17 @@ def test_only():
 
 
 class ModelLoss(nn.Module):
-    def __init__(self, model, loss_fns, zero=1e-12):
+    def __init__(self, model, loss_fns, zero=1e-7):
         super().__init__()
         self.model = model
         self.loss_fns = nn.ModuleList(loss_fns)
         self.zero = zero
 
     def forward(self, imgs, positions, weights):
-        weights = torch.clamp(weights, min=self.zero)
+        # weights = self.zero + F.relu(weights - self.zero)
         pred_positions, pred_weights = self.model(imgs)
-        pred_weights = torch.clamp(pred_weights, min=self.zero)
+        print(pred_positions, positions)
+        print(pred_weights, weights)
         loss = 0
         for loss_fn in self.loss_fns:
             loss += loss_fn(pred_positions, pred_weights, positions, weights)
@@ -143,7 +149,7 @@ def plot_pred_ground_truth(pred_positions, pred_weights,
 
 
 def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
-            reduction='mean', threshold=50, zero=1e-12):
+            reduction='mean', threshold=50, zero=1e-7):
     dim = pred_positions.shape[2]
     jaccards = []
     rmses_xy = []
@@ -225,7 +231,7 @@ def load_checkpoint(filename, model, optimizer=None):
 
 
 @exp.capture
-def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
+def train_eval_loop(model_loss, loader, fold, epoch, output_dir, zero,
                     device, log_interval, _run, optimizer=None, train=False,
                     ):
     records = dict(loss=0.)
@@ -249,13 +255,13 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
             if train:
                 optimizer.zero_grad()
             loss, pred_positions, pred_weights = model_loss(imgs, positions, weights)
-
+            clip_grad_norm_(optimizer.param_groups[0]['params'], 10)
             if train:
                 loss.backward()
             else:
                 jaccard, rmse_xy, rmse_z = metrics(
                     pred_positions, pred_weights, positions, weights,
-                    offset=offset, scale=scale)
+                    offset=offset, scale=scale, zero=zero)
                 records['jaccard'] += jaccard * batch_size
                 records['rmse_xy'] += rmse_xy * batch_size
                 records['rmse_z'] += rmse_z * batch_size
@@ -290,7 +296,7 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
 def main(test_source, train_size, n_jobs,
          eval_size, batch_size, n_epochs, checkpoint,
          distance_type, test_only, dimension, test_size,
-         loss, coupled, terms, kernel, sigmas, epsilon, rho, lr,
+         loss, coupled, terms, kernel, sigmas, epsilon, rho, lr, zero,
          batch_norm, train_only,
          modality, device, _seed, _run):
     output_dir = join(base_dir, str(_run._id), 'artifacts')
@@ -335,8 +341,8 @@ def main(test_source, train_size, n_jobs,
 
     plot_example(datasets, output_dir=output_dir)
 
-    model = CNNPos(beads=100, dimension=dimension, batch_norm=batch_norm,
-                   architecture='deep_loco')
+    model = CNNPos(beads=50, dimension=dimension, batch_norm=batch_norm,
+                   architecture='resnet', zero=zero)
     loss_fns = []
     for sigma in sigmas:
         loss_fns.append(MeasureDistance(loss=loss,
@@ -346,11 +352,11 @@ def main(test_source, train_size, n_jobs,
                                         kernel=kernel,
                                         max_iter=100,
                                         sigma=sigma,
-                                        graph_surgery='loop',
+                                        graph_surgery='',
                                         verbose=False,
                                         epsilon=epsilon, rho=rho,
                                         reduction='mean'))
-    loss_model = ModelLoss(model, loss_fns)
+    loss_model = ModelLoss(model, loss_fns, zero=zero)
 
     if not test_only:
         optimizer = Adam(loss_model.parameters(), lr=lr, amsgrad=True)
@@ -364,7 +370,7 @@ def main(test_source, train_size, n_jobs,
     loss_model.to(device)
 
     for epoch in range(n_epochs):
-        np.random.seed()
+        np.random.seed(0)
         if not train_only:
             train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
                             output_dir=output_dir)
@@ -374,8 +380,9 @@ def main(test_source, train_size, n_jobs,
             train_eval_loop(loss_model, loaders['train'], 'train', epoch,
                             optimizer=optimizer,
                             train=True, output_dir=output_dir)
-            save_checkpoint(model, optimizer,
-                            join(output_dir, f'checkpoint.pkl'))
+            if epoch % 100 == 0:
+                save_checkpoint(model, optimizer,
+                                join(output_dir, f'checkpoint.pkl'))
 
 
 if __name__ == '__main__':
