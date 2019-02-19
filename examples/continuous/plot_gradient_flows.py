@@ -7,8 +7,8 @@ from gsoftmax.continuous import MeasureDistance
 from gsoftmax.sampling import draw_samples, display_samples
 
 n_points = 100
-lr = .1
-t1 = 10
+lr = 1e-6
+t1 = 1e-5
 from_grid = True
 flow = 'lifted'
 
@@ -23,7 +23,7 @@ else:
     x = np.concatenate((grid[0][:, :, None], grid[1][:, :, None]), axis=2)
     x = x.reshape((-1, 2))
     a = np.ones(len(x)) / len(x)
-    a *= 0.
+    a *= 1e-4
 
 x = torch.from_numpy(x).float()
 a = torch.from_numpy(a).float()
@@ -43,7 +43,7 @@ sinkhorn_divergence = MeasureDistance(loss='sinkhorn',
                                       distance_type=2,
                                       kernel='energy_squared',
                                       max_iter=100,
-                                      rho=1,
+                                      rho=1000,
                                       sigma=1, graph_surgery='',
                                       verbose=False,
                                       epsilon=1e-3)
@@ -69,8 +69,10 @@ for i, t in enumerate(times):  # Euler scheme ===============
         gx = x.grad / a[:, :, None]
         ga = torch.zeros_like(a)
     else:
-        gx = x.grad / len(a) / a[:, :, None]
+        gx = x.grad / len(a)
         ga = a.grad / len(a)
+        # ga.clamp_(max=1)
+        # gx.clamp_(max=1)
     info = f't = {t:.3f}, loss {loss.item():.4f}'
     if i in display_its:  # display
         ax = plt.subplot(2, 3, k)
@@ -86,8 +88,10 @@ for i, t in enumerate(times):  # Euler scheme ===============
         plt.xticks([], [])
         plt.yticks([], [])
         ax.set_aspect('equal', adjustable='box')
-    x.data -= gx * lr
+    print(info)
+    print(gx)
+    x.data -= gx * lr * 1e8
     a.data -= ga * lr
-    a.data = a.data.clamp_(min=0.)
+    a.data = a.data.clamp_(min=1e-12)
 
 plt.show()

@@ -171,7 +171,6 @@ class MeasureDistance(nn.Module):
                 return potentials['xx']
             return (potentials['xx'], potentials['yx'],
                     potentials['yy'], potentials['xy'])
-
         weights = {dir: torch.log(weight) for dir, weight in weights.items()}
         for dir in running:
             potentials[dir] = torch.zeros_like(weights[dir[0]])
@@ -272,7 +271,7 @@ class SafeLSE(torch.autograd.Function):
         operand,  = ctx.saved_tensors
         mask = torch.all(torch.isinf(operand), dim=2) ^ 1
         s = torch.ones_like(operand) / operand.shape[2]
-        s[mask] = torch.softmax(s[mask], dim=1)
+        s[mask] = torch.softmax(operand[mask], dim=1)
         return s * grad_output[:, :, None]
 
 
