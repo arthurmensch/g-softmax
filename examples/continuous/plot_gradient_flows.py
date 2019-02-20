@@ -56,7 +56,7 @@ x = Parameter(x)
 a = Parameter(a)
 
 optimizer = Adam([dict(params=[x],
-                       lr=1e-1),
+                       lr=1e-3),
                   dict(params=[a],
                        lr=1e-3)])
 

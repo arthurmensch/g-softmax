@@ -1,4 +1,5 @@
 import copy
+import math
 from contextlib import nullcontext
 
 import torch
@@ -22,7 +23,7 @@ def duality_gap(potential, new_potential):
         return res.mean().item()
 
 
-def bmm(x, y):
+def bmm(x: torch.tensor, y):
     """
     Batched matrix multiplication
 
@@ -228,7 +229,7 @@ class MeasureDistance(nn.Module):
         potential = masker(potential, weight == -float('inf'), -float('inf'))
         sum = potential / epsilon + weight
         operand = kernel / epsilon + sum[:, None, :]
-        lse = - epsilon * torch.logsumexp(operand, dim=2)
+        lse = - epsilon * safe_lse(operand)
         return lse
 
     def forward(self, x: torch.tensor, a: torch.tensor,
@@ -442,15 +443,10 @@ class CNNPos(nn.Module):
             state_size = 1000
 
         if residual_fc:
-            flat_seq = [nn.Linear(state_size, 2048),
-                        ResLinear(2048, 2048),
-                        ResLinear(2048, 2048),
-                        ResLinear(2048, 2048)]
+            flat_seq = [nn.Linear(state_size, 2048),]
         else:
             shapes = [(state_size, 2048),
-                      ResLinear(2048, 2048),
-                      ResLinear(2048, 2048),
-                      ResLinear(2048, 2048),
+                      nn.Linear(2048, 2048),
                       ]
             flat_seq = []
             for i, o in shapes:
@@ -459,11 +455,9 @@ class CNNPos(nn.Module):
                     flat_seq.append(nn.BatchNorm1d(o))
                 flat_seq.append(nn.ReLU(True))
 
-        self.pos_fc = nn.Sequential(*flat_seq,
-                                    nn.Linear(2048, beads * dimension, ))
+        self.pos_fc = nn.Sequential(nn.Linear(state_size, beads * dimension, ))
 
-        self.weight_fc = nn.Sequential(*copy.deepcopy(flat_seq),
-                                       nn.Linear(2048, beads))
+        self.weight_fc = nn.Sequential(nn.Linear(state_size, beads))
 
         self.dimension = dimension
         self.beads = beads
@@ -474,5 +468,5 @@ class CNNPos(nn.Module):
         position = torch.sigmoid(self.pos_fc(x).view(-1, self.beads,
                                                      self.dimension) * 5)
         weights = self.weight_fc(x)
-        weights = self.zero + F.relu(weights - self.zero)
+        weights = F.relu(weights)
         return position, weights
