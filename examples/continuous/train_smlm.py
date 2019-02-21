@@ -1,3 +1,4 @@
+import functools
 import os
 from contextlib import nullcontext
 from os.path import join, expanduser
@@ -75,7 +76,7 @@ def single_batch():
     train_size = int(4)
     eval_size = 4
     test_size = 4
-    train_only = True
+    # train_only = True
 
 
 @exp.named_config
@@ -211,8 +212,8 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
     return jaccard, rmse_xy, rmse_z
 
 
-def worker_init_fn(worker_id):
-    np.random.seed(np.random.get_state()[1][0] + worker_id)
+def worker_init_fn(worker_id, offset):
+    np.random.seed(np.random.get_state()[1][0] + worker_id + offset)
 
 
 def save_checkpoint(model, optimizer, filename):
@@ -326,15 +327,15 @@ def main(test_source, train_size, n_jobs,
                                               shape=shape,
                                               psf_radius=2000,
                                               w_range=w_range,
-                                              seed=100 if fold == 'eval'
-                                              else None,
                                               batch_size=1,
                                               dimension=dimension,
                                               return_activation=False,
                                               modality=modality)
         loaders[fold] = DataLoader(datasets[fold],
                                    batch_size=batch_size,
-                                   worker_init_fn=worker_init_fn,
+                                   worker_init_fn=functools.partial(
+                                       worker_init_fn,
+                                       offset=1000 * (fold == 'eval')),
                                    num_workers=n_jobs,
                                    pin_memory=torch.device.type == 'cuda',
                                    shuffle=fold == 'train')
