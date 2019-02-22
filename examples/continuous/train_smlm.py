@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from gsoftmax.continuous import MeasureDistance, CNNPos
 from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
+from gsoftmax.sinkhorn import SinkhornDivergence
 
 SETTINGS.HOST_INFO.INCLUDE_GPU_INFO = False
 
@@ -343,20 +344,25 @@ def main(test_source, train_size, n_jobs,
     plot_example(datasets, output_dir=output_dir)
 
     model = CNNPos(beads=beads, dimension=dimension, batch_norm=batch_norm,
-                   architecture='resnet', zero=zero)
+                   architecture='deep_loco', zero=zero)
     loss_fns = []
     for sigma in sigmas:
-        loss_fns.append(MeasureDistance(loss=loss,
-                                        coupled=coupled,
-                                        terms=terms,
-                                        distance_type=distance_type,
-                                        kernel=kernel,
-                                        max_iter=100,
-                                        sigma=sigma,
-                                        graph_surgery='loop+pos+weight',
-                                        verbose=False,
-                                        epsilon=epsilon, rho=rho,
-                                        reduction='mean'))
+        # loss_fns.append(MeasureDistance(loss=loss,
+        #                                 coupled=coupled,
+        #                                 terms=terms,
+        #                                 distance_type=distance_type,
+        #                                 kernel=kernel,
+        #                                 max_iter=100,
+        #                                 sigma=sigma,
+        #                                 graph_surgery='loop+pos+weight',
+        #                                 verbose=False,
+        #                                 epsilon=epsilon, rho=rho,
+        #                                 reduction='mean'))
+        loss_fns.append(
+            SinkhornDivergence(
+                              p=2, q=2, sigma=sigma, epsilon=1e-2,
+                              rho=1e-2, max_iter=100, tol=1e-6)
+        )
     loss_model = ModelLoss(model, loss_fns, zero=zero)
 
     if not test_only:
@@ -371,7 +377,7 @@ def main(test_source, train_size, n_jobs,
     loss_model.to(device)
 
     for epoch in range(n_epochs):
-        np.random.seed()
+        np.random.seed(0)
         if not train_only:
             train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
                             output_dir=output_dir)
