@@ -6,7 +6,9 @@ from os.path import join, expanduser
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from gsoftmax.deep_loco import SyntheticSMLMDatasetOriginal
+from gsoftmax.continuous import CNNPos
+from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
+from gsoftmax.sinkhorn import MeasureDistance
 from sacred import Experiment
 from sacred import SETTINGS
 from sacred.observers import FileStorageObserver
@@ -16,10 +18,6 @@ from torch import nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
-
-from gsoftmax.sinkhorn import MeasureDistance
-from gsoftmax.continuous import CNNPos
-from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
 
 SETTINGS.HOST_INFO.INCLUDE_GPU_INFO = False
 
@@ -53,16 +51,16 @@ def base():
     p = 2
     q = 2
     sigmas = [1]
-    epsilon = 1e-3
+    epsilon = 1e-2
     rho = 1
 
     zero = 1e-7
 
-    architecture = 'resnet'
-    batch_norm = True
+    architecture = 'deep_loco'
+    batch_norm = False
 
-    batch_size = 512
-    train_size = int(512 * 1024)
+    batch_size = 1024
+    train_size = int(1024 * 1024)
     eval_size = 2048
     test_size = None
 
@@ -77,14 +75,8 @@ def base():
 @exp.named_config
 def multi_scale():
     measure = 'sinkhorn'
-    p = 2
-    q = 2
     sigmas = [1, 0.5, 0.25, 0.1]
     epsilon = 1e-2
-    rho = 1
-    architecture = 'deep_loco'
-    batch_size = 1024
-    batch_norm = False
     mass_norm = True
 
 
@@ -94,11 +86,9 @@ def mmd():
     p = 1
     q = 1
     sigmas = [0.01, 0.02, 0.04, 0.12]
-    architecture = 'deep_loco'
-    batch_norm = False
     mass_norm = False
-    lr = 1e-5
-    gamma = .5
+    lr = 1e-4
+    gamma = 1
 
 
 @exp.named_config
@@ -300,13 +290,14 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
             # clip_grad_norm_(optimizer.param_groups[0]['params'], 10)
             if train:
                 loss.backward()
-            if not train or batch_idx == 0:
+            if fold != 'train' or batch_idx == 0:
+                size = batch_size if fold != 'train' else n_samples
                 jaccard, rmse_xy, rmse_z = metrics(
                     pred_positions, pred_weights, positions, weights,
                     offset=offset, scale=scale)
-                records['jaccard'] += jaccard * batch_size
-                records['rmse_xy'] += rmse_xy * batch_size
-                records['rmse_z'] += rmse_z * batch_size
+                records['jaccard'] += jaccard * size
+                records['rmse_xy'] += rmse_xy * size
+                records['rmse_z'] += rmse_z * size
 
             if batch_idx == 0:
                 for i in range(1):
@@ -374,11 +365,6 @@ def main(test_source, train_size, n_jobs,
                                               dimension=dimension,
                                               return_activation=False,
                                               modality=modality)
-        # datasets[fold] = SyntheticSMLMDatasetOriginal(max_beads=max_beads,
-        #                                               noise=100,
-        #                                               return_activation=False,
-        #                                               dimension=dimension,
-        #                                               length=lengths[fold])
         loaders[fold] = DataLoader(datasets[fold],
                                    batch_size=batch_size,
                                    worker_init_fn=functools.partial(
