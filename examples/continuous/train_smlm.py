@@ -6,6 +6,7 @@ from os.path import join, expanduser
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from gsoftmax.deep_loco import SyntheticSMLMDatasetOriginal
 from sacred import Experiment
 from sacred import SETTINGS
 from sacred.observers import FileStorageObserver
@@ -13,6 +14,7 @@ from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import pairwise_distances
 from torch import nn
 from torch.optim import Adam
+from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 
 from gsoftmax.sinkhorn import MeasureDistance
@@ -33,7 +35,7 @@ def system():
     checkpoint = None
     log_interval = 100
 
-    n_jobs = 1
+    n_jobs = 8
 
     test_only = False
     train_only = False
@@ -42,10 +44,12 @@ def system():
 @exp.config
 def base():
     test_source = 'MT0.N1.LD'
-    modality = '2D'
-    dimension = 2
+    modality = 'AS'
+    dimension = 3
 
-    measure = 'right_hausdorff'
+    gamma = 1
+
+    measure = 'sinkhorn'
     p = 2
     q = 2
     sigmas = [1]
@@ -58,18 +62,29 @@ def base():
     batch_norm = True
 
     batch_size = 512
-    train_size = int(5120)
+    train_size = int(512 * 1e3)
     eval_size = 2048
     test_size = None
 
     mass_norm = True
-    lr = 1e-5
-
+    lr = 1e-4
 
     beads = 50
 
-    n_epochs = 1000
+    n_epochs = 100
 
+
+@exp.named_config
+def multi_scale():
+    measure = 'sinkhorn'
+    p = 2
+    q = 2
+    sigmas = [1, 0.5, 0.25, 0.1]
+    epsilon = 1e-2
+    rho = 1
+    architecture = 'deep_loco'
+    batch_norm = False
+    mass_norm = True
 
 @exp.named_config
 def mmd():
@@ -80,17 +95,17 @@ def mmd():
     architecture = 'deep_loco'
     batch_norm = False
     mass_norm = False
-    lr = 1e-4
+    lr = 1e-5
+    gamma = .5
 
 
 @exp.named_config
 def single_batch():
     device = 'cpu'
-    batch_size = 4
-    train_size = int(4)
-    eval_size = 4
-    test_size = 4
-    train_only = True
+    batch_size = 1
+    train_size = int(1)
+    eval_size = 1
+    test_size = 1
 
 
 @exp.named_config
@@ -151,8 +166,7 @@ def plot_pred_ground_truth(pred_positions, pred_weights,
     for ax, p, w in zip(axes, (pred_positions, positions),
                         (pred_weights, weights)):
         ax.imshow(img[0])
-        ax.scatter(p[:, 0] * m,
-                   p[:, 1] * n,
+        ax.scatter(p[:, 0] * m,p[:, 1] * n,
                    s=w * 10, color='red')
         ax.set_xlim([0, 64])
         ax.set_ylim([0, 64])
@@ -163,7 +177,7 @@ def plot_pred_ground_truth(pred_positions, pred_weights,
 
 @exp.capture
 def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
-            zero, reduction='mean', threshold=50):
+            zero, reduction='mean', threshold=100):
     dim = pred_positions.shape[2]
     jaccards = []
     rmses_xy = []
@@ -193,22 +207,32 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
             cost_matrix = pairwise_distances(ppos, pos, metric='euclidean')
             row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
-            match = cost_matrix[row_ind, col_ind]
+            matched_cost = cost_matrix[row_ind, col_ind]
             fn = max(0, len(pos) - len(ppos))
-            tp = (match < threshold).sum()
-            fp = len(match) - tp
+            mask = matched_cost < threshold
+            tp = mask.sum()
+            fp = len(mask) - tp
             jaccard = float(tp) / (fn + fp + tp)
 
             if dim == 2:
-                rmse_xy = match.sum()
+                if tp > 0:
+                    rmse_xy = np.sqrt((matched_cost[mask] ** 2).mean())
+                else:
+                    rmse_xy = 0.
                 rmse_z = 0.
             else:
                 cost_matrix_xy = pairwise_distances(ppos[:, :2], pos[:, :2],
                                                     metric='euclidean')
                 cost_matrix_z = pairwise_distances(ppos[:, 2:3], pos[:, 2:3],
                                                    metric='euclidean')
-                rmse_xy = np.sqrt((cost_matrix_xy[row_ind, col_ind] ** 2).mean())
-                rmse_z = np.sqrt((cost_matrix_z[row_ind, col_ind] ** 2).mean())
+                if tp > 0:
+                    rmse_xy = np.sqrt((cost_matrix_xy[row_ind, col_ind][mask]
+                                       ** 2).mean())
+                    rmse_z = np.sqrt((cost_matrix_z[row_ind, col_ind][mask]
+                                      ** 2).mean())
+                else:
+                    rmse_xy = 0.
+                    rmse_z = 0.
 
         jaccards.append(jaccard)
         rmses_xy.append(rmse_xy)
@@ -228,20 +252,23 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
 
 
 def worker_init_fn(worker_id, offset):
-    np.random.seed(np.random.get_state()[1][0] + worker_id + offset)
+    np.random.seed((torch.initial_seed() + worker_id + offset) % (2 ** 32))
 
 
-def save_checkpoint(model, optimizer, filename):
+def save_checkpoint(model, optimizer, scheduler, filename):
     state_dict = {'model': model.state_dict(),
-                  'optimizer': optimizer.state_dict()}
+                  'optimizer': optimizer.state_dict(),
+                  'scheduler': optimizer.state_dict()}
     torch.save(state_dict, filename)
 
 
-def load_checkpoint(filename, model, optimizer=None):
+def load_checkpoint(filename, model, optimizer=None, scheduler=None):
     state_dict = torch.load(filename)
     model.load_state_dict(state_dict['model'])
     if optimizer is not None:
         optimizer.load_state_dict(state_dict['optimizer'])
+    if scheduler is not None:
+        scheduler.load_state_dict(state_dict['scheduler'])
 
 
 @exp.capture
@@ -249,16 +276,15 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
                     device, log_interval, _run, optimizer=None, train=False,
                     ):
     records = dict(loss=0.)
-    if not train:
-        records['jaccard'] = 0.
-        records['rmse_xy'] = 0.
-        records['rmse_z'] = 0.
+    records['jaccard'] = 0.
+    records['rmse_xy'] = 0.
+    records['rmse_z'] = 0.
     n_samples = 0
     if train:
         model_loss.train()
     else:
         model_loss.eval()
-        offset, scale, _, _, _ = loader.dataset.get_geometry()
+    offset, scale, _, _, _ = loader.dataset.get_geometry()
     with torch.no_grad() if not train else nullcontext():
         for batch_idx, (imgs, positions, weights) in enumerate(loader):
             batch_size = imgs.shape[0]
@@ -272,7 +298,7 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
             # clip_grad_norm_(optimizer.param_groups[0]['params'], 10)
             if train:
                 loss.backward()
-            else:
+            if not train or batch_idx == 0:
                 jaccard, rmse_xy, rmse_z = metrics(
                     pred_positions, pred_weights, positions, weights,
                     offset=offset, scale=scale)
@@ -310,7 +336,7 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
 def main(test_source, train_size, n_jobs,
          eval_size, batch_size, n_epochs, checkpoint,
          test_only, dimension, test_size, architecture,
-         measure, sigmas, epsilon, rho, lr, zero, p, q,
+         measure, sigmas, epsilon, rho, lr, zero, p, q, gamma,
          batch_norm, train_only, beads,
          modality, device, _seed, _run):
     output_dir = join(base_dir, str(_run._id), 'artifacts')
@@ -346,6 +372,11 @@ def main(test_source, train_size, n_jobs,
                                               dimension=dimension,
                                               return_activation=False,
                                               modality=modality)
+        # datasets[fold] = SyntheticSMLMDatasetOriginal(max_beads=max_beads,
+        #                                               noise=100,
+        #                                               return_activation=False,
+        #                                               dimension=dimension,
+        #                                               length=lengths[fold])
         loaders[fold] = DataLoader(datasets[fold],
                                    batch_size=batch_size,
                                    worker_init_fn=functools.partial(
@@ -370,31 +401,34 @@ def main(test_source, train_size, n_jobs,
 
     if not test_only:
         optimizer = Adam(loss_model.parameters(), lr=lr, amsgrad=True)
+        scheduler = StepLR(optimizer, lr, gamma=gamma)
     else:
         n_epochs = 1
         optimizer = None
+        scheduler = None
 
     if checkpoint is not None:
-        load_checkpoint(checkpoint, model, optimizer=optimizer)
+        load_checkpoint(checkpoint, model, optimizer=optimizer, scheduler=scheduler)
 
     loss_model.to(device)
 
     for epoch in range(n_epochs):
         if single_batch:
-            np.random.seed(0)
+            torch.manual_seed(_seed + 1)
         else:
-            np.random.seed(epoch)
+            torch.manual_seed(_seed + epoch + 1)
         if not train_only:
             train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
                             output_dir=output_dir)
             train_eval_loop(loss_model, loaders['test'], 'test', epoch,
                             output_dir=output_dir)
         if not test_only:
+            scheduler.step(epoch)
             train_eval_loop(loss_model, loaders['train'], 'train', epoch,
                             optimizer=optimizer,
                             train=True, output_dir=output_dir)
             if epoch % 10 == 0:
-                save_checkpoint(model, optimizer,
+                save_checkpoint(model, optimizer, scheduler,
                                 join(output_dir, f'checkpoint.pkl'))
 
 

@@ -467,6 +467,6 @@ class CNNPos(nn.Module):
         x = self.barebone(x)
         position = torch.sigmoid(self.pos_fc(x).view(-1, self.beads,
                                                      self.dimension) * 5)
-        weights = self.weight_fc(x)
+        weights = self.weight_fc(x) + 10. / x.shape[1]
         weights = F.relu(weights)
         return position, weights

@@ -38,8 +38,8 @@ b = b[None, :]
 y = y[None, :]
 
 loss_fn = MeasureDistance(measure='right_hausdorff',
-                          p=2, q=2, sigma=1, epsilon=1e-3,
-                          rho=1, max_iter=1000, tol=1e-6,
+                          p=2, q=2, sigma=1, epsilon=1,
+                          rho=1e4, max_iter=1000, tol=1e-6,
                           mass_norm=True)
 
 # Parameters for the gradient descent
@@ -51,7 +51,7 @@ x = Parameter(x)
 a = Parameter(a)
 a.data.clamp_(min=1e-7)
 
-optimizer = Adam([dict(params=[x, a], lr=1e-1)])
+optimizer = Adam([dict(params=[x, a], lr=1e-3)], amsgrad=True)
 
 plt.figure(figsize=(12, 8))
 k = 1
