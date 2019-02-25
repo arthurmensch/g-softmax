@@ -1,5 +1,6 @@
 import torch
 
+
 def bmm(x: torch.tensor, y):
     """
     Batched matrix multiplication
@@ -26,7 +27,7 @@ def duality_gap(potential, new_potential):
         return res.mean().item()
 
 
-def pairwise_distance(x, y, q=2, p=2, sigma=1, exp=False, ):
+def pairwise_distance(x, y, p=2, q=2, sigma=1, exp=False, ):
     if p == 2:
         outer = torch.einsum('bld,bkd->blk', x, y)
         norm_x = torch.sum(x ** 2, dim=2)
@@ -37,7 +38,7 @@ def pairwise_distance(x, y, q=2, p=2, sigma=1, exp=False, ):
         if q == 1:
             k = - torch.sqrt(distance + 1e-8) / sigma
         elif q == 2:
-            k = - distance / 2 / sigma ** 2
+            k = - distance / sigma ** 2
         else:
             raise ValueError(f'Wrong q argument for p==2, got `{q}`')
     elif p == 1:
@@ -106,58 +107,94 @@ def potentials(x, a, y, b, p, q, sigma, epsilon, rho, max_iter, tol):
     return f, g
 
 
-def evaluate_potential(x, a, y, b, g, p, q, sigma, epsilon, rho):
+def evaluate_potential(x, a, y, b, g, p, q, sigma, epsilon, rho,
+                       mass_norm=False, detach_pot=False):
+    if detach_pot:
+        g = g.detach()
+        b = b.detach()
     y = y.detach()
-    b = b.detach()
     log_b = b.log()
     kxy = pairwise_distance(x, y, p, q, sigma)
 
     f = c_transform(g, log_b, kxy, epsilon, rho)
     f = phi_transform(f, epsilon, rho)
     # f = masker(f, a == 0, 0)
-    return scaled_dot_prod(a, f)
-    # return torch.sum(a * f, dim=1)
+    if mass_norm:
+        return scaled_dot_prod(a, f)
+    else:
+        return torch.sum(a * f, dim=1)
 
 
-def sinkhorn_distance(x, a, y, b, p, q, sigma, epsilon, rho, max_iter, tol):
-    f, g = potentials(x, a, y, b, p, q, sigma, epsilon, rho, max_iter, tol)
-    f, g = f.detach(), g.detach()
-    return (evaluate_potential(x, a, y, b, g, p, q, sigma, epsilon, rho)
-            + evaluate_potential(y, b, x, a, f, p, q, sigma, epsilon, rho))
+def sinkhorn_distance(x, a, y, b, p, q, sigma, epsilon, rho, max_iter, tol,
+                      mass_norm):
+    with torch.no_grad():
+        f, g = potentials(x, a, y, b, p, q, sigma, epsilon, rho, max_iter, tol)
+    return (evaluate_potential(x, a, y, b, g, p, q, sigma, epsilon, rho,
+                               mass_norm, detach_pot=True)
+            + evaluate_potential(y, b, x, a, f, p, q, sigma, epsilon, rho,
+                                 mass_norm, detach_pot=True))
 
 
-def sinkhorn_entropy(x, a, p, q, sigma, epsilon, rho, max_iter, tol):
-    f = sym_potential(x, a, p, q, sigma, epsilon, rho, max_iter, tol)
-    f = f.detach()
-    return evaluate_potential(x, a, x, a, f, p, q, sigma, epsilon, rho)
+def sinkhorn_entropy(x, a, p, q, sigma, epsilon, rho, max_iter, tol,
+                     mass_norm):
+    with torch.no_grad():
+        f = sym_potential(x, a, p, q, sigma, epsilon, rho, max_iter, tol)
+    return evaluate_potential(x, a, x, a, f, p, q, sigma, epsilon, rho,
+                              mass_norm, detach_pot=True)
 
 
-def sinkhorn_divergence(x, a, y, b, p, q, sigma, epsilon, rho, max_iter, tol):
+def sinkhorn_divergence(x, a, y, b, p, q, sigma, epsilon, rho, max_iter, tol,
+                        mass_norm):
     return (sinkhorn_distance(x, a, y, b, p, q, sigma, epsilon,
-                              rho, max_iter, tol)
-            - sinkhorn_entropy(x, a, p, q, sigma, epsilon, rho, max_iter, tol)
-            - sinkhorn_entropy(y, b, p, q, sigma, epsilon, rho, max_iter, tol))
+                              rho, max_iter, tol, mass_norm)
+            - sinkhorn_entropy(x, a, p, q, sigma, epsilon, rho, max_iter, tol, mass_norm)
+            - sinkhorn_entropy(y, b, p, q, sigma, epsilon, rho, max_iter, tol, mass_norm))
 
 
 def hausdorff_divergence(x, a, y, b, p, q, sigma,
-                         epsilon, rho, max_iter, tol):
+                         epsilon, rho, max_iter, tol, mass_norm):
     f = sym_potential(x, a, p, q, sigma, epsilon, rho, max_iter, tol)
-    return (evaluate_potential(y, b, x, a, f, p, q, sigma, epsilon, rho)
-            - sinkhorn_entropy(y, b, p, q, sigma, epsilon, rho, max_iter, tol))
+    return (evaluate_potential(y, b, x, a, f, p, q, sigma, epsilon, rho, mass_norm, detach_pot=False)
+            - sinkhorn_entropy(y, b, p, q, sigma, epsilon, rho, max_iter, tol, mass_norm))
 
 
 def rev_hausdorff_divergence(x, a, y, b, p, q, sigma,
-                         epsilon, rho, max_iter, tol):
+                             epsilon, rho, max_iter, tol, mass_norm):
     return hausdorff_divergence(y, b, x, a, p, q, sigma,
-                         epsilon, rho, max_iter, tol)
+                                epsilon, rho, max_iter, tol, mass_norm)
 
 
 def sym_hausdorff_divergence(x, a, y, b, p, q, sigma,
-                             epsilon, rho, max_iter, tol):
+                             epsilon, rho, max_iter, tol, mass_norm):
     return (hausdorff_divergence(x, a, y, b, p, q, sigma,
-                                 epsilon, rho, max_iter, tol) +
+                                 epsilon, rho, max_iter, tol, mass_norm) +
             hausdorff_divergence(y, b, x, a, p, q, sigma,
-                                 epsilon, rho, max_iter, tol)) / 2
+                                 epsilon, rho, max_iter, tol, mass_norm)) / 2
+
+
+def bmm(x: torch.tensor, y):
+    """
+    Batched matrix multiplication
+
+    :param x:
+    :param y:
+    :return:
+    """
+    return torch.einsum('blk,bk->bl', x, y)
+
+
+def mmd(x, a, y, b, p, q, sigma, mass_norm):
+    Kxy = pairwise_distance(x, y, p, q, sigma, exp=True)
+    Kyy = pairwise_distance(y, y, p, q, sigma, exp=True)
+    Kxx = pairwise_distance(x, x, p, q, sigma, exp=True)
+    if mass_norm:
+        return (scaled_dot_prod(a, bmm(Kxx, a)) +
+                scaled_dot_prod(b, bmm(Kyy, b)) -
+                2 * scaled_dot_prod(a, bmm(Kxy, b))) / 2
+    else:
+        return (torch.sum(a * bmm(Kxx, a), dim=1) +
+                torch.sum(b * bmm(Kyy, b), dim=1)
+                - 2 * torch.sum(a * bmm(Kxy, b), dim=1)) / 2
 
 
 class LogSumExpInf(torch.autograd.Function):
@@ -209,8 +246,10 @@ class ScaledDotProd(torch.autograd.Function):
 scaled_dot_prod = ScaledDotProd.apply
 
 
-class SinkhornDivergence(torch.nn.Module):
-    def __init__(self, p, q, sigma, epsilon, rho, max_iter, tol):
+class MeasureDistance(torch.nn.Module):
+    def __init__(self, measure='sinkhorn',
+                 p=2, q=2, sigma=1., epsilon=1., rho=None, max_iter=100,
+                 tol=1e-6, mass_norm=False, reduction='mean'):
         super().__init__()
         self.p = p
         self.q = q
@@ -219,8 +258,38 @@ class SinkhornDivergence(torch.nn.Module):
         self.rho = rho
         self.max_iter = max_iter
         self.tol = tol
+        self.measure = measure
+        self.reduction = reduction
+        self.mass_norm = mass_norm
 
     def forward(self, x, a, y, b):
-        return sinkhorn_divergence(x, a, y, b, self.p, self.q,
-                                   self.sigma, self.epsilon, self.rho,
-                                   self.max_iter, self.tol).mean()
+        if self.measure == 'sinkhorn':
+            res = sinkhorn_divergence(x, a, y, b, self.p, self.q,
+                                      self.sigma, self.epsilon, self.rho,
+                                      self.max_iter, self.tol,
+                                      self.mass_norm)
+        elif self.measure == 'sym_hausdorff':
+            res = sym_hausdorff_divergence(x, a, y, b, self.p, self.q,
+                                           self.sigma, self.epsilon, self.rho,
+                                           self.max_iter, self.tol,
+                                           self.mass_norm)
+        elif self.measure == 'left_hausdorff':
+            res = hausdorff_divergence(x, a, y, b, self.p, self.q,
+                                       self.sigma, self.epsilon, self.rho,
+                                       self.max_iter, self.tol,
+                                       self.mass_norm)
+        elif self.measure == 'right_hausdorff':
+            res = hausdorff_divergence(y, b, x, a, self.p, self.q,
+                                       self.sigma, self.epsilon, self.rho,
+                                       self.max_iter, self.tol,
+                                       self.mass_norm)
+        elif self.measure == 'mmd':
+            res = mmd(y, b, x, a, self.p, self.q, self.sigma, self.mass_norm)
+        else:
+            raise ValueError
+        if self.reduction == 'mean':
+            return res.mean()
+        elif self.reduction == 'sum':
+            return res.sum()
+        else:
+            return res

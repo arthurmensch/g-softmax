@@ -1,17 +1,11 @@
-import functools
-
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.nn import Parameter
 from torch.optim import Adam, SGD
 
-from gsoftmax.continuous import MeasureDistance
+from gsoftmax.sinkhorn import MeasureDistance
 from gsoftmax.sampling import draw_samples, display_samples
-from gsoftmax.sinkhorn import sinkhorn_divergence, hausdorff_divergence, \
-    sym_hausdorff_divergence, rev_hausdorff_divergence
-
-import torch.nn.functional as F
 
 n_points = 100
 lr = 1e-5
@@ -25,7 +19,7 @@ g2 = np.linspace(0, 1, 20)
 grid = np.meshgrid(g1, g2)
 xg = np.concatenate((grid[0][:, :, None], grid[1][:, :, None]), axis=2)
 xg = xg.reshape((-1, 2))
-ag = np.zeros(len(xg))
+ag = np.ones(len(xg)) / len(xg)
 
 # x = np.concatenate((x, xg), axis=0)
 # a = np.concatenate((a, ag), axis=0)
@@ -43,9 +37,10 @@ b = torch.from_numpy(b).float()
 b = b[None, :]
 y = y[None, :]
 
-loss_fn = functools.partial(sym_hausdorff_divergence,
-                            p=2, q=2, sigma=1, epsilon=1e-1,
-                            rho=1e-1, max_iter=100, tol=1e-6)
+loss_fn = MeasureDistance(measure='right_hausdorff',
+                          p=2, q=2, sigma=1, epsilon=1e-3,
+                          rho=1, max_iter=1000, tol=1e-6,
+                          mass_norm=True)
 
 # Parameters for the gradient descent
 n_steps = 100
@@ -56,7 +51,7 @@ x = Parameter(x)
 a = Parameter(a)
 a.data.clamp_(min=1e-7)
 
-optimizer = Adam([dict(params=[x, a], lr=1e-2)])
+optimizer = Adam([dict(params=[x, a], lr=1e-1)])
 
 plt.figure(figsize=(12, 8))
 k = 1
@@ -85,4 +80,3 @@ for i, t in enumerate(times):  # Euler scheme ===============
     a.data.clamp_(min=1e-7)
     print(info)
 plt.show()
-
