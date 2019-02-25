@@ -44,7 +44,7 @@ def system():
 @exp.config
 def base():
     test_source = 'MT0.N1.LD'
-    modality = 'AS'
+    modality = '2D'
     dimension = 3
 
     gamma = 1
@@ -62,7 +62,7 @@ def base():
     batch_norm = True
 
     batch_size = 512
-    train_size = int(512 * 1e3)
+    train_size = int(512 * 1024)
     eval_size = 2048
     test_size = None
 
@@ -83,8 +83,10 @@ def multi_scale():
     epsilon = 1e-2
     rho = 1
     architecture = 'deep_loco'
+    batch_size = 1024
     batch_norm = False
     mass_norm = True
+
 
 @exp.named_config
 def mmd():
@@ -366,7 +368,7 @@ def main(test_source, train_size, n_jobs,
                                               offset=offset,
                                               scale=scale,
                                               shape=shape,
-                                              psf_radius=2000,
+                                              psf_radius=2700,
                                               w_range=w_range,
                                               batch_size=1,
                                               dimension=dimension,

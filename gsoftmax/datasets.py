@@ -238,7 +238,7 @@ class ForwardModel(object):
         self.background_noise = background_noise
 
         self.centers = activations.loc[0].values[:, :2]
-        self.weights = activations.loc[0].values[:, 3]
+        self.weights = activations.loc[0].values[:, 3] * 6
 
         zstack = np.array(zstack) - self.background_noise
         k, m, n = zstack.shape
@@ -255,6 +255,7 @@ class ForwardModel(object):
             img, kx=1, ky=1) for img in zstack]
         self.z_offset = source_offset[2]
         self.z_scale = source_scale[2]
+        self.z_res = source_scale[2] / len(zstack - 1)
 
         self.offset = offset
         self.scale = scale
@@ -277,7 +278,7 @@ class ForwardModel(object):
             for ((x, y, z), w) in zip(position, weight):
                 if w != 0.0:
                     assert self.z_offset < z < self.z_offset + self.z_scale
-                    z_scaled = (z - self.z_offset) / self.z_scale
+                    z_scaled = (z - self.z_offset) / self.z_res
                     zl = int(np.floor(z_scaled))
                     zu = int(np.ceil(z_scaled))
 
@@ -287,8 +288,8 @@ class ForwardModel(object):
                     gridy = np.linspace(self.offset[1],
                                         self.scale[1] + self.offset[1], n,
                                         endpoint=False) - y
-                    # gridx *= 3
-                    # gridy *= 3
+                    # gridx *= (150 / 64) ** 2
+                    # gridy *= (150 / 64) ** 2
                     x_mask = abs(gridx) < self.psf_radius
                     y_mask = abs(gridy) < self.psf_radius
                     x_nnz = x_mask.nonzero()[0]
