@@ -252,7 +252,7 @@ class ForwardModel(object):
             img, kx=1, ky=1) for img in zstack]
         self.z_offset = source_offset[2]
         self.z_scale = source_scale[2]
-        self.z_res = source_scale[2] / len(zstack - 1)
+        self.z_res = source_scale[2] / (len(zstack) - 1)
 
         self.offset = offset
         self.scale = scale

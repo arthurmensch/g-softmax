@@ -162,4 +162,5 @@ class CNNPos(nn.Module):
                                  * multiplier)
         weights = self.weight_fc(x) + offset
         weights = torch.clamp(weights, min=self.zero)
+        # weights = torch.ones_like(weights) / x.shape[1] * 10
         return position, weights

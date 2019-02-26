@@ -8,7 +8,8 @@ import numpy as np
 import torch
 from gsoftmax.continuous import CNNPos
 from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
-from gsoftmax.sinkhorn import MeasureDistance
+from gsoftmax.sinkhorn import MeasureDistance, sym_potential, \
+    evaluate_potential, pairwise_distance, c_transform, phi_transform
 from sacred import Experiment
 from sacred import SETTINGS
 from sacred.observers import FileStorageObserver
@@ -43,7 +44,7 @@ def system():
 def base():
     test_source = 'MT0.N1.LD'
     modality = '2D'
-    dimension = 3
+    dimension = 2
 
     gamma = 1
 
@@ -54,7 +55,7 @@ def base():
     epsilon = 1e-2
     rho = 1
 
-    zero = 1e-7
+    zero = 1e-16
 
     architecture = 'deep_loco'
     batch_norm = False
@@ -66,46 +67,70 @@ def base():
 
     mass_norm = True
     lr = 1e-4
+    beads = 256
 
-    beads = 50
 
     n_epochs = 100
+
+    repeat = False
 
 
 @exp.named_config
 def sinkhorn():
+    beads = 256
+
+    batch_size = 128
+    train_size = int(128 * 900)
+    eval_size = 256 * 3
+
     measure = 'sinkhorn'
-    sigmas = [1]
+    architecture = 'deep_loco'
+    sigmas = [1, 0.5, 0.25, 0.1]
     epsilon = 1e-2
     mass_norm = False
+
+    lr = 1e-4
+    epoch = 100
 
 
 @exp.named_config
 def right_hausdorff():
     measure = 'right_hausdorff'
-    sigmas = [1, 0.5, 0.25, 0.1]
+    sigmas = [1]
     epsilon = 1e-2
     mass_norm = True
+    lr = 1e-4
+
 
 @exp.named_config
 def mmd():
+    beads = 256
+
+    batch_size = 128
+    train_size = int(128 * 900)
+    eval_size = 256 * 3
     measure = 'mmd'
     p = 1
     q = 1
     sigmas = [0.01, 0.02, 0.04, 0.12]
     mass_norm = False
     lr = 1e-4
-    gamma = 1
+    gamma = .5
+    n_epochs = 7
+
+    architecture = 'deep_loco'
+    batch_norm = False
 
 
 @exp.named_config
 def single_batch():
     device = 'cpu'
-    batch_size = 2
-    train_size = int(2)
-    eval_size = 2
-    test_size = 2
-
+    batch_size = 1
+    train_size = int(1)
+    eval_size = 1
+    test_size = 1
+    repeat = True
+    train_only = True
 
 @exp.named_config
 def test_only():
@@ -149,11 +174,12 @@ def plot_example(datasets, output_dir):
     plt.savefig(join(output_dir, 'examples.png'))
     plt.close(fig)
 
-
+@exp.capture
 def plot_pred_ground_truth(pred_positions, pred_weights,
                            positions, weights,
-                           img, filename):
-    fig, axes = plt.subplots(1, 2, figsize=(5, 5))
+                           img, filename, p, q, epsilon, zero,
+                              rho):
+    fig, axes = plt.subplots(1, 4, figsize=(10, 5))
     c, m, n = img.shape
 
     pred_positions = pred_positions.detach().cpu()
@@ -162,14 +188,50 @@ def plot_pred_ground_truth(pred_positions, pred_weights,
     pred_weights = pred_weights.detach().cpu()
     img = img.detach().cpu()
 
-    for ax, p, w in zip(axes, (pred_positions, positions),
+    weights[weights == zero] = 0
+    pred_weights[pred_weights == zero] = 0
+    for ax, pos, w in zip(axes, (pred_positions, positions),
                         (pred_weights, weights)):
+        pos = pos[w > 0]
+        w = w[w > 0]
         ax.imshow(img[0])
-        ax.scatter(p[:, 0] * m,p[:, 1] * n,
+        ax.scatter(pos[:, 0] * m, pos[:, 1] * n,
                    s=w * 10, color='red')
         ax.set_xlim([0, 64])
         ax.set_ylim([0, 64])
         ax.axis('off')
+
+    potential = sum(sym_potential(positions[None, :], weights[None, :], p, q, sigma, epsilon,
+                              rho, 100, 1e-6) for sigma in [1])
+    pred_potential = sum(
+        sym_potential(pred_positions[None, :], pred_weights[None, :], p, q, sigma,
+                      epsilon,
+                      rho, 100, 1e-6) for sigma in [1])
+    g1 = np.linspace(0, 1, 100, dtype=np.float32)
+    g2 = np.linspace(0, 1, 100, dtype=np.float32)
+    grid = np.meshgrid(g1, g2)
+    grid = np.concatenate((grid[0][:, :, None], grid[1][:, :, None]), axis=2)
+    grid = grid.reshape((-1, 2))
+    grid = torch.from_numpy(grid)[None, :]
+
+    kxy = pairwise_distance(grid, positions[None, :], p, q, 1.)
+
+    f = c_transform(potential, weights.log(), kxy, epsilon, rho)
+    f = phi_transform(f, epsilon, rho)
+    axes[2].contour(g1, g2, f[0].reshape(len(g1), len(g2)), 50)
+    axes[2].set_xlim([0, 1])
+    axes[2].set_ylim([0, 1])
+    axes[2].set_aspect('equal')
+
+    kxy = pairwise_distance(grid, pred_positions[None, :], p, q, 1.)
+
+    f = c_transform(pred_potential, pred_weights.log(), kxy, epsilon, rho)
+    f = phi_transform(f, epsilon, rho)
+    axes[3].contour(g1, g2, f[0].reshape(len(g1), len(g2)), 50)
+    axes[3].set_xlim([0, 1])
+    axes[3].set_ylim([0, 1])
+    axes[3].set_aspect('equal')
+
     plt.savefig(filename)
     plt.close(fig)
 
@@ -251,7 +313,7 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
 
 
 def worker_init_fn(worker_id, offset):
-    np.random.seed((np.random.get_state()[1][0] + worker_id + offset) % (2 ** 32))
+    np.random.seed((torch.initial_seed() + worker_id + offset) % (2 ** 31))
 
 
 def save_checkpoint(model, optimizer, scheduler, filename):
@@ -337,7 +399,7 @@ def main(test_source, train_size, n_jobs,
          eval_size, batch_size, n_epochs, checkpoint,
          test_only, dimension, test_size, architecture,
          measure, sigmas, epsilon, rho, lr, zero, p, q, gamma,
-         batch_norm, train_only, beads,
+         batch_norm, train_only, beads, repeat,
          modality, device, _seed, _run):
     output_dir = join(base_dir, str(_run._id), 'artifacts')
     if not os.path.exists(output_dir):
@@ -396,7 +458,7 @@ def main(test_source, train_size, n_jobs,
 
     if not test_only:
         optimizer = Adam(loss_model.parameters(), lr=lr, amsgrad=True)
-        scheduler = StepLR(optimizer, lr, gamma=gamma)
+        scheduler = StepLR(optimizer, 1, gamma=gamma)
     else:
         n_epochs = 1
         optimizer = None
@@ -408,11 +470,10 @@ def main(test_source, train_size, n_jobs,
     loss_model.to(device)
 
     for epoch in range(n_epochs):
-        if single_batch:
+        if repeat:
             torch.manual_seed(_seed)
-            np.random.seed(_seed)
-        torch.manual_seed(_seed + epoch)
-        np.random.seed(_seed + epoch)
+        else:
+            torch.manual_seed(_seed + epoch)
         if not train_only:
             train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
                             output_dir=output_dir)
