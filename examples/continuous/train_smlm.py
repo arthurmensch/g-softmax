@@ -73,12 +73,19 @@ def base():
 
 
 @exp.named_config
-def multi_scale():
+def sinkhorn():
     measure = 'sinkhorn'
+    sigmas = [1]
+    epsilon = 1e-2
+    mass_norm = False
+
+
+@exp.named_config
+def right_hausdorff():
+    measure = 'right_hausdorff'
     sigmas = [1, 0.5, 0.25, 0.1]
     epsilon = 1e-2
     mass_norm = True
-
 
 @exp.named_config
 def mmd():
@@ -94,10 +101,10 @@ def mmd():
 @exp.named_config
 def single_batch():
     device = 'cpu'
-    batch_size = 1
-    train_size = int(1)
-    eval_size = 1
-    test_size = 1
+    batch_size = 2
+    train_size = int(2)
+    eval_size = 2
+    test_size = 2
 
 
 @exp.named_config
@@ -244,13 +251,13 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
 
 
 def worker_init_fn(worker_id, offset):
-    np.random.seed((torch.initial_seed() + worker_id + offset) % (2 ** 32))
+    np.random.seed((np.random.get_state()[1][0] + worker_id + offset) % (2 ** 32))
 
 
 def save_checkpoint(model, optimizer, scheduler, filename):
     state_dict = {'model': model.state_dict(),
                   'optimizer': optimizer.state_dict(),
-                  'scheduler': optimizer.state_dict()}
+                  'scheduler': scheduler.state_dict()}
     torch.save(state_dict, filename)
 
 
@@ -402,9 +409,10 @@ def main(test_source, train_size, n_jobs,
 
     for epoch in range(n_epochs):
         if single_batch:
-            torch.manual_seed(_seed + 1)
-        else:
-            torch.manual_seed(_seed + epoch + 1)
+            torch.manual_seed(_seed)
+            np.random.seed(_seed)
+        torch.manual_seed(_seed + epoch)
+        np.random.seed(_seed + epoch)
         if not train_only:
             train_eval_loop(loss_model, loaders['eval'], 'eval', epoch,
                             output_dir=output_dir)

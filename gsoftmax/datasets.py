@@ -145,7 +145,6 @@ class SyntheticSMLMDataset(Dataset):
     def __init__(self, offset, scale, shape, w_range,
                  max_beads=3, noise=100, batch_size=1,
                  length=100, modality='2D', return_activation=True,
-                 seed=None,
                  psf_radius=2700, dimension=3):
 
         self.forward_model = ForwardModel(offset, scale, shape,
@@ -182,8 +181,6 @@ class SyntheticSMLMDataset(Dataset):
         self.max_beads = max_beads
         self.w_range = w_range
 
-        if seed is not None:
-            np.random.seed(seed)
 
     def __getitem__(self, i):
         positions, weights = self.parameter_prior.sample(self.batch_size)
