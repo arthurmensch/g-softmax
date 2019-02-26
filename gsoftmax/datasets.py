@@ -181,7 +181,6 @@ class SyntheticSMLMDataset(Dataset):
         self.max_beads = max_beads
         self.w_range = w_range
 
-
     def __getitem__(self, i):
         positions, weights = self.parameter_prior.sample(self.batch_size)
         positions = positions.astype('float32')
@@ -274,10 +273,12 @@ class ForwardModel(object):
         for img, position, weight in zip(imgs, positions, weights):
             for ((x, y, z), w) in zip(position, weight):
                 if w != 0.0:
-                    assert self.z_offset < z < self.z_offset + self.z_scale
+                    # assert self.z_offset < z < self.z_offset + self.z_scale
                     z_scaled = (z - self.z_offset) / self.z_res
                     zl = int(np.floor(z_scaled))
                     zu = int(np.ceil(z_scaled))
+                    zl = max(0, min(zu, len(self.splines) - 1))
+                    zl = max(0, min(zl, len(self.splines) - 1))
 
                     gridx = np.linspace(self.offset[0],
                                         self.scale[0] + self.offset[0], m,

@@ -37,30 +37,31 @@ b = torch.from_numpy(b).float()
 b = b[None, :]
 y = y[None, :]
 
-loss_fn = MeasureDistance(measure='right_hausdorff',
-                          p=2, q=2, sigma=1, epsilon=1,
-                          rho=1e4, max_iter=1000, tol=1e-6,
+loss_fn = MeasureDistance(measure='sinkhorn',
+                          p=2, q=2, sigma=1, epsilon=1e-3,
+                          rho=None, max_iter=1000, tol=1e-6,
                           mass_norm=True)
 
 # Parameters for the gradient descent
-n_steps = 100
+n_steps = 20
 times = np.linspace(0, 1, n_steps + 1)
 display_its = np.floor(np.linspace(0, n_steps, 5).astype('int'))
 
 x = Parameter(x)
 a = Parameter(a)
-a.data.clamp_(min=1e-7)
+a.data.clamp_(min=0.)
 
-optimizer = Adam([dict(params=[x, a], lr=1e-3)], amsgrad=True)
+optimizer = SGD([dict(params=[x, a], lr=.1)])
 
 plt.figure(figsize=(12, 8))
 k = 1
 for i, t in enumerate(times):  # Euler scheme ===============
     # Compute cost and gradient
     optimizer.zero_grad()
-    with torch.autograd.detect_anomaly():
-        loss = loss_fn(x, a, y, b)
-        loss.backward()
+    # with torch.autograd.detect_anomaly():
+    loss = loss_fn(x, a, y, b)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_([a], .1)
     info = f't = {t:.3f}, loss {loss.item():.4f}'
     if i in display_its:  # display
         ax = plt.subplot(2, 3, k)
@@ -77,6 +78,6 @@ for i, t in enumerate(times):  # Euler scheme ===============
         plt.yticks([], [])
         ax.set_aspect('equal', adjustable='box')
     optimizer.step()
-    a.data.clamp_(min=1e-7)
+    a.data.clamp_(min=0.)
     print(info)
 plt.show()

@@ -6,7 +6,7 @@ from os.path import join, expanduser
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from gsoftmax.continuous import CNNPos
+from gsoftmax.continuous import CNNPos, Sum, EpsilonLR
 from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
 from gsoftmax.sinkhorn import MeasureDistance, sym_potential, \
     evaluate_potential, pairwise_distance, c_transform, phi_transform
@@ -43,51 +43,47 @@ def system():
 @exp.config
 def base():
     test_source = 'MT0.N1.LD'
-    modality = '2D'
-    dimension = 2
-
-    gamma = 1
+    modality = 'AS'
+    dimension = 3
 
     measure = 'sinkhorn'
     p = 2
     q = 2
-    sigmas = [1]
+    sigma = [1]
     epsilon = 1e-2
     rho = 1
 
+    beads = 256
+
     zero = 1e-16
 
-    architecture = 'deep_loco'
+    architecture = 'resnet'
     batch_norm = False
 
-    batch_size = 1024
+    batch_size = 512
     train_size = int(1024 * 1024)
     eval_size = 2048
     test_size = None
 
     mass_norm = True
-    lr = 1e-4
-    beads = 256
 
+    lr = 1e-4
+    gamma = 1
 
     n_epochs = 100
 
     repeat = False
 
+    epsilon_gamma = 1.
 
 @exp.named_config
 def sinkhorn():
-    beads = 256
-
-    batch_size = 128
-    train_size = int(128 * 900)
-    eval_size = 256 * 3
-
     measure = 'sinkhorn'
-    architecture = 'deep_loco'
-    sigmas = [1, 0.5, 0.25, 0.1]
-    epsilon = 1e-2
-    mass_norm = False
+    sigma = [1]
+    epsilon = 1e-1
+    epsilon_gamma = .5
+
+    batch_size = 512
 
     lr = 1e-4
     epoch = 100
@@ -96,30 +92,26 @@ def sinkhorn():
 @exp.named_config
 def right_hausdorff():
     measure = 'right_hausdorff'
-    sigmas = [1]
-    epsilon = 1e-2
+    sigma = [1]
+    epsilon = 1e-1
     mass_norm = True
     lr = 1e-4
 
 
 @exp.named_config
 def mmd():
-    beads = 256
-
-    batch_size = 128
-    train_size = int(128 * 900)
-    eval_size = 256 * 3
     measure = 'mmd'
     p = 1
     q = 1
-    sigmas = [0.01, 0.02, 0.04, 0.12]
-    mass_norm = False
-    lr = 1e-4
+    sigma = [0.01, 0.02, 0.04, 0.12]
     gamma = .5
+    batch_size = 1024
     n_epochs = 7
+    lr = 1e-4
 
     architecture = 'deep_loco'
     batch_norm = False
+    mass_norm = False
 
 
 @exp.named_config
@@ -132,6 +124,7 @@ def single_batch():
     repeat = True
     train_only = True
 
+
 @exp.named_config
 def test_only():
     device = 'cpu'
@@ -140,20 +133,18 @@ def test_only():
 
 
 class ClampedModelLoss(nn.Module):
-    def __init__(self, model, loss_fns, zero=1e-7):
+    def __init__(self, model, loss_fn, zero=1e-7):
         super().__init__()
         self.model = model
-        self.loss_fns = nn.ModuleList(loss_fns)
+        self.loss_fn = loss_fn
         self.zero = zero
 
     def forward(self, imgs, positions, weights):
         pred_positions, pred_weights = self.model(imgs)
         weights = torch.clamp(weights, min=self.zero)
         pred_weights = torch.clamp(pred_weights, min=self.zero)
-        loss = 0
-        for loss_fn in self.loss_fns:
-            loss += loss_fn(pred_positions, pred_weights, positions, weights)
-        return loss, pred_positions, pred_weights
+        return self.loss_fn(pred_positions, pred_weights,
+                       positions, weights), pred_positions, pred_weights
 
 
 def plot_example(datasets, output_dir):
@@ -174,12 +165,13 @@ def plot_example(datasets, output_dir):
     plt.savefig(join(output_dir, 'examples.png'))
     plt.close(fig)
 
+
 @exp.capture
 def plot_pred_ground_truth(pred_positions, pred_weights,
                            positions, weights,
-                           img, filename, p, q, epsilon, zero,
-                              rho):
-    fig, axes = plt.subplots(1, 4, figsize=(10, 5))
+                           img, filename, zero,
+                           p, q, epsilon, rho):
+    fig, axes = plt.subplots(1, 2, figsize=(5, 5))
     c, m, n = img.shape
 
     pred_positions = pred_positions.detach().cpu()
@@ -191,7 +183,7 @@ def plot_pred_ground_truth(pred_positions, pred_weights,
     weights[weights == zero] = 0
     pred_weights[pred_weights == zero] = 0
     for ax, pos, w in zip(axes, (pred_positions, positions),
-                        (pred_weights, weights)):
+                          (pred_weights, weights)):
         pos = pos[w > 0]
         w = w[w > 0]
         ax.imshow(img[0])
@@ -200,37 +192,37 @@ def plot_pred_ground_truth(pred_positions, pred_weights,
         ax.set_xlim([0, 64])
         ax.set_ylim([0, 64])
         ax.axis('off')
-
-    potential = sum(sym_potential(positions[None, :], weights[None, :], p, q, sigma, epsilon,
-                              rho, 100, 1e-6) for sigma in [1])
-    pred_potential = sum(
-        sym_potential(pred_positions[None, :], pred_weights[None, :], p, q, sigma,
-                      epsilon,
-                      rho, 100, 1e-6) for sigma in [1])
-    g1 = np.linspace(0, 1, 100, dtype=np.float32)
-    g2 = np.linspace(0, 1, 100, dtype=np.float32)
-    grid = np.meshgrid(g1, g2)
-    grid = np.concatenate((grid[0][:, :, None], grid[1][:, :, None]), axis=2)
-    grid = grid.reshape((-1, 2))
-    grid = torch.from_numpy(grid)[None, :]
-
-    kxy = pairwise_distance(grid, positions[None, :], p, q, 1.)
-
-    f = c_transform(potential, weights.log(), kxy, epsilon, rho)
-    f = phi_transform(f, epsilon, rho)
-    axes[2].contour(g1, g2, f[0].reshape(len(g1), len(g2)), 50)
-    axes[2].set_xlim([0, 1])
-    axes[2].set_ylim([0, 1])
-    axes[2].set_aspect('equal')
-
-    kxy = pairwise_distance(grid, pred_positions[None, :], p, q, 1.)
-
-    f = c_transform(pred_potential, pred_weights.log(), kxy, epsilon, rho)
-    f = phi_transform(f, epsilon, rho)
-    axes[3].contour(g1, g2, f[0].reshape(len(g1), len(g2)), 50)
-    axes[3].set_xlim([0, 1])
-    axes[3].set_ylim([0, 1])
-    axes[3].set_aspect('equal')
+    #
+    # potential = sum(sym_potential(positions[None, :], weights[None, :], p, q, sigma, epsilon,
+    #                           rho, 100, 1e-6) for sigma in [1])
+    # pred_potential = sum(
+    #     sym_potential(pred_positions[None, :], pred_weights[None, :], p, q, sigma,
+    #                   epsilon,
+    #                   rho, 100, 1e-6) for sigma in [1])
+    # g1 = np.linspace(0, 1, 100, dtype=np.float32)
+    # g2 = np.linspace(0, 1, 100, dtype=np.float32)
+    # grid = np.meshgrid(g1, g2)
+    # grid = np.concatenate((grid[0][:, :, None], grid[1][:, :, None]), axis=2)
+    # grid = grid.reshape((-1, 2))
+    # grid = torch.from_numpy(grid)[None, :]
+    #
+    # kxy = pairwise_distance(grid, positions[None, :], p, q, 1.)
+    #
+    # f = c_transform(potential, weights.log(), kxy, epsilon, rho)
+    # f = phi_transform(f, epsilon, rho)
+    # axes[2].contour(g1, g2, f[0].reshape(len(g1), len(g2)), 50)
+    # axes[2].set_xlim([0, 1])
+    # axes[2].set_ylim([0, 1])
+    # axes[2].set_aspect('equal')
+    #
+    # kxy = pairwise_distance(grid, pred_positions[None, :], p, q, 1.)
+    #
+    # f = c_transform(pred_potential, pred_weights.log(), kxy, epsilon, rho)
+    # f = phi_transform(f, epsilon, rho)
+    # axes[3].contour(g1, g2, f[0].reshape(len(g1), len(g2)), 50)
+    # axes[3].set_xlim([0, 1])
+    # axes[3].set_ylim([0, 1])
+    # axes[3].set_aspect('equal')
 
     plt.savefig(filename)
     plt.close(fig)
@@ -261,18 +253,26 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
         pos = pos[weight > zero]
 
         if len(pos) == 0 or len(ppos) == 0:
-            jaccard = 0.
             rmse_xy = 0.
             rmse_z = 0.
+            if len(pos) == 0 and len(ppos) > 0:
+                jaccard = 0
+            elif len(ppos) == 0 and len(pos) > 0:
+                jaccard = 0
+            else:
+                jaccard = 1
         else:
-            cost_matrix = pairwise_distances(ppos, pos, metric='euclidean')
+            cost_matrix = pairwise_distances(pos, ppos, metric='euclidean')
             row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
             matched_cost = cost_matrix[row_ind, col_ind]
-            fn = max(0, len(pos) - len(ppos))
             mask = matched_cost < threshold
             tp = mask.sum()
-            fp = len(mask) - tp
+            fn = len(mask) - tp
+            non_matched_mask = np.ones(cost_matrix.shape[1], dtype=np.bool)
+            non_matched_mask[col_ind] = 0
+            non_matched_cost = cost_matrix[:, non_matched_mask]
+            fp = np.all(non_matched_cost > threshold, axis=0).sum()
             jaccard = float(tp) / (fn + fp + tp)
 
             if dim == 2:
@@ -282,9 +282,9 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
                     rmse_xy = 0.
                 rmse_z = 0.
             else:
-                cost_matrix_xy = pairwise_distances(ppos[:, :2], pos[:, :2],
+                cost_matrix_xy = pairwise_distances(pos[:, :2], ppos[:, :2],
                                                     metric='euclidean')
-                cost_matrix_z = pairwise_distances(ppos[:, 2:3], pos[:, 2:3],
+                cost_matrix_z = pairwise_distances(pos[:, 2:3], ppos[:, 2:3],
                                                    metric='euclidean')
                 if tp > 0:
                     rmse_xy = np.sqrt((cost_matrix_xy[row_ind, col_ind][mask]
@@ -294,13 +294,20 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
                 else:
                     rmse_xy = 0.
                     rmse_z = 0.
-
         jaccards.append(jaccard)
-        rmses_xy.append(rmse_xy)
-        rmses_z.append(rmse_z)
+        if rmse_xy != 0:
+            rmses_xy.append(rmse_xy)
+        elif rmse_z != 0:
+            rmses_z.append(rmse_z)
+
+    if len(rmses_xy) == 0:
+        rmses_xy = [0.]
+    if len(rmses_z) == 0:
+        rmses_z = [0.]
+
     jaccard = torch.tensor(jaccards)
     rmse_xy = torch.tensor(rmses_xy)
-    rmse_z = torch.tensor(rmse_z)
+    rmse_z = torch.tensor(rmses_z)
     if reduction == 'mean':
         jaccard = jaccard.mean()
         rmse_xy = rmse_xy.mean()
@@ -355,12 +362,12 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
             weights = weights.to(device)
             if train:
                 optimizer.zero_grad()
-            loss, pred_positions, pred_weights = model_loss(imgs, positions, weights)
-            # clip_grad_norm_(optimizer.param_groups[0]['params'], 10)
+            loss, pred_positions, pred_weights = model_loss(imgs, positions,
+                                                            weights)
             if train:
                 loss.backward()
             if fold != 'train' or batch_idx == 0:
-                size = batch_size if fold != 'train' else n_samples
+                size = len(loader.dataset) if fold == 'train' else batch_size
                 jaccard, rmse_xy, rmse_z = metrics(
                     pred_positions, pred_weights, positions, weights,
                     offset=offset, scale=scale)
@@ -398,7 +405,8 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
 def main(test_source, train_size, n_jobs,
          eval_size, batch_size, n_epochs, checkpoint,
          test_only, dimension, test_size, architecture,
-         measure, sigmas, epsilon, rho, lr, zero, p, q, gamma,
+         measure, sigma, epsilon, rho, lr, zero, p, q, gamma,
+         epsilon_gamma,
          batch_norm, train_only, beads, repeat,
          modality, device, _seed, _run):
     output_dir = join(base_dir, str(_run._id), 'artifacts')
@@ -447,25 +455,38 @@ def main(test_source, train_size, n_jobs,
 
     model = CNNPos(beads=beads, dimension=dimension, batch_norm=batch_norm,
                    architecture=architecture, zero=zero)
-    loss_fns = []
-    for sigma in sigmas:
-        loss_fns.append(MeasureDistance(measure=measure, p=p, q=q,
-                                        max_iter=100,
-                                        sigma=sigma,
-                                        epsilon=epsilon, rho=rho,
-                                        reduction='mean'))
-    loss_model = ClampedModelLoss(model, loss_fns, zero=zero)
+
+    if len(sigma) > 1:
+        loss_fn = Sum(MeasureDistance(measure=measure, p=p, q=q,
+                                      max_iter=100,
+                                      sigma=this_sigma,
+                                      epsilon=epsilon, rho=rho,
+                                      reduction='mean')
+                      for this_sigma in sigma)
+        epsilon_scheduler = None
+        # Desactivated for now
+    else:
+        if hasattr(sigma, '__iter__'):
+            sigma = sigma[0]
+        loss_fn = MeasureDistance(measure=measure, p=p, q=q,
+                                  max_iter=100,
+                                  sigma=sigma,
+                                  epsilon=epsilon, rho=rho,
+                                  reduction='mean')
+        epsilon_scheduler = EpsilonLR(loss_fn, step_size=1, gamma=epsilon_gamma)
+    loss_model = ClampedModelLoss(model, loss_fn, zero=zero)
 
     if not test_only:
         optimizer = Adam(loss_model.parameters(), lr=lr, amsgrad=True)
-        scheduler = StepLR(optimizer, 1, gamma=gamma)
+        scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
     else:
         n_epochs = 1
         optimizer = None
         scheduler = None
 
     if checkpoint is not None:
-        load_checkpoint(checkpoint, model, optimizer=optimizer, scheduler=scheduler)
+        load_checkpoint(checkpoint, model, optimizer=optimizer,
+                        scheduler=scheduler)
 
     loss_model.to(device)
 
@@ -481,6 +502,8 @@ def main(test_source, train_size, n_jobs,
                             output_dir=output_dir)
         if not test_only:
             scheduler.step(epoch)
+            if epsilon_scheduler is not None:
+                epsilon_scheduler.step(epoch)
             train_eval_loop(loss_model, loaders['train'], 'train', epoch,
                             optimizer=optimizer,
                             train=True, output_dir=output_dir)

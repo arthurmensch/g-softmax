@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils import clip_grad_norm_
 from torchvision.models.resnet import BasicBlock
 
 
@@ -32,6 +33,39 @@ class Flatten(nn.Module):
 
     def forward(self, x):
         return x.view(x.shape[0], -1)
+
+
+class Sum(nn.Module):
+    def __init__(self, module_list):
+        super().__init__()
+        self.module_list = nn.ModuleList(module_list)
+
+    def forward(self, *args):
+        loss = 0
+        for module in self.module_list:
+            loss += module(*args)
+        return loss
+
+
+class EpsilonLR:
+    def __init__(self, loss_fn, step_size=1, gamma=1, last_epoch=-1,
+                 min_epsilon=1e-4):
+        self.loss_fn = loss_fn
+        self.last_epoch = last_epoch
+        self.base_epsilon = self.loss_fn.epsilon
+        self.gamma = gamma
+        self.step_size = step_size
+        self.min_epsilon = min_epsilon
+
+    def step(self, epoch=None):
+        if epoch is None:
+            epoch = self.last_epoch + 1
+        self.last_epoch = epoch
+        epsilon = max(self.min_epsilon,
+                      self.base_epsilon * self.gamma
+                      ** (self.last_epoch // self.step_size))
+
+        self.loss_fn.epsilon = epsilon
 
 
 class ResNet(nn.Module):
@@ -162,5 +196,7 @@ class CNNPos(nn.Module):
                                  * multiplier)
         weights = self.weight_fc(x) + offset
         weights = torch.clamp(weights, min=self.zero)
-        # weights = torch.ones_like(weights) / x.shape[1] * 10
+
+        # weights.register_hook(lambda g: g.clamp(min=-10, max=10))
+
         return position, weights

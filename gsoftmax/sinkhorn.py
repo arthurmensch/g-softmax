@@ -58,11 +58,11 @@ def pairwise_distance(x, y, p=2, q=2, sigma=1, exp=False, ):
 def c_transform(potential, log_weight, kernel, epsilon, rho):
     # Edge case potential = + infty, weight = - infty
     scale = 1 if rho is None else 1 + epsilon / rho
-    # potential = masker(potential, log_weight == -float('inf'), -float('inf'))
+    potential = masker(potential, log_weight == -float('inf'), -float('inf'))
     sum = potential / epsilon + log_weight
     operand = kernel / epsilon + sum[:, None, :]
-    # lse = - epsilon * logsumexp_inf(operand)
-    lse = - epsilon * torch.logsumexp(operand, dim=2)
+    lse = - epsilon * logsumexp_inf(operand)
+    # lse = - epsilon * torch.logsumexp(operand, dim=2)
     return lse / scale
 
 
@@ -71,10 +71,10 @@ def phi_transform(f, epsilon, rho):
         return f
     else:
         scale = 1 + epsilon / rho
-        # f = f.clone()
-        # mask = torch.isfinite(f)
-        # f[mask] = - rho * ((- f[mask] / rho).exp() - 1)
-        f = - rho * ((-f / rho).exp() - 1)
+        f = f.clone()
+        mask = torch.isfinite(f)
+        f[mask] = - rho * ((- f[mask] / rho).exp() - 1)
+        # f = - rho * ((-f / rho).exp() - 1)
         return f * scale
 
 
@@ -115,13 +115,12 @@ def evaluate_potential(x, a, y, b, g, p, q, sigma, epsilon, rho,
     y = y.detach()
     log_b = b.log()
     kxy = pairwise_distance(x, y, p, q, sigma)
-
     f = c_transform(g, log_b, kxy, epsilon, rho)
     f = phi_transform(f, epsilon, rho)
-    # f = masker(f, a == 0, 0)
     if mass_norm:
         return scaled_dot_prod(a, f)
     else:
+        f = masker(f, a == 0, 0)
         return torch.sum(a * f, dim=1)
 
 
