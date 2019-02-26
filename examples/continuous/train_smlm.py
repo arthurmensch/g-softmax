@@ -96,6 +96,7 @@ def right_hausdorff():
     epsilon = 1e-1
     mass_norm = True
     lr = 1e-4
+    epsilon_gamma = .5
 
 
 @exp.named_config
