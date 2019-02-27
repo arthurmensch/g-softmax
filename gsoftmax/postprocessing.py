@@ -1,5 +1,7 @@
 import joblib
 import torch
+import numpy as np
+from gsoftmax.sinkhorn import pairwise_distance
 
 
 def pairwise_l2_dist(p):
@@ -23,7 +25,7 @@ def cluster_and_trim(positions, weights, pre_weight_thresh, distance_threshold,
     if distance_threshold == 0:
         return positions, weights
 
-    A = (pairwise_l2_dist(positions) < distance_threshold).float()
+    A = (- pairwise_distance(positions, positions, p=2, q=1) < distance_threshold).float()
     # zero out rows and columns corresponding to zero-weight positions.
     zero_inds = ((weights == 0).unsqueeze(-1).float() * (
         torch.ones_like(weights).unsqueeze(-2))).sign_().byte()
@@ -43,18 +45,9 @@ def cluster_and_trim(positions, weights, pre_weight_thresh, distance_threshold,
     proc_positions = torch.zeros_like(positions)
     proc_weights = torch.zeros_like(weights)
 
-    C = C.numpy()
+    C = C.cpu().numpy()
     for b in range(positions.shape[0]):
-        this_C = C[b]
-        inds = []
-        row_set = set()
-        for i, row in enumerate(this_C):
-            hash = joblib.hash(row)
-            if hash not in row_set and C_weights[b, i] != 0:
-                row_set.add(hash)
-                inds.append(i)
-        print('n_cluster', len(inds))
-        # This assumes float arithmetic works perfectly. Fun fact: it does not.
+        _, inds = np.unique(C[b], axis=0, return_index=True)
         proc_positions[b, :len(inds)] = C_means[b, inds]
         proc_weights[b, :len(inds)] = C_weights[b, inds]
     return proc_positions, proc_weights
