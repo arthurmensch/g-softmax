@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from gsoftmax.continuous import CNNPos, Sum, EpsilonLR
 from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
+from gsoftmax.postprocessing import cluster_and_trim
 from gsoftmax.sinkhorn import MeasureDistance, sym_potential, \
     evaluate_potential, pairwise_distance, c_transform, phi_transform
 from sacred import Experiment
@@ -30,7 +31,7 @@ exp.observers.append(FileStorageObserver.create(base_dir))
 @exp.config
 def system():
     device = 0
-    seed = 100
+    seed = 200
     checkpoint = None
     log_interval = 100
 
@@ -93,10 +94,11 @@ def sinkhorn():
 def right_hausdorff():
     measure = 'right_hausdorff'
     sigma = [1]
-    epsilon = 1e-1
+    epsilon = 1e-3
     mass_norm = True
     lr = 1e-4
     epsilon_gamma = .5
+    rho = 100
 
 
 @exp.named_config
@@ -105,9 +107,11 @@ def mmd():
     p = 1
     q = 1
     sigma = [0.01, 0.02, 0.04, 0.12]
-    gamma = .5
+    gamma = 1
+    zero = 0
     batch_size = 1024
-    n_epochs = 7
+    train_size = 1024 * 1024
+    n_epochs = 100
     lr = 1e-4
 
     architecture = 'deep_loco'
@@ -170,7 +174,7 @@ def plot_example(datasets, output_dir):
 @exp.capture
 def plot_pred_ground_truth(pred_positions, pred_weights,
                            positions, weights,
-                           img, filename, zero,
+                           img, filename,
                            p, q, epsilon, rho):
     fig, axes = plt.subplots(1, 2, figsize=(5, 5))
     c, m, n = img.shape
@@ -181,8 +185,6 @@ def plot_pred_ground_truth(pred_positions, pred_weights,
     pred_weights = pred_weights.detach().cpu()
     img = img.detach().cpu()
 
-    weights[weights == zero] = 0
-    pred_weights[pred_weights == zero] = 0
     for ax, pos, w in zip(axes, (pred_positions, positions),
                           (pred_weights, weights)):
         pos = pos[w > 0]
@@ -231,8 +233,10 @@ def plot_pred_ground_truth(pred_positions, pred_weights,
 
 @exp.capture
 def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
-            zero, reduction='mean', threshold=100):
+            reduction='mean', threshold=100):
     dim = pred_positions.shape[2]
+
+
     jaccards = []
     rmses_xy = []
     rmses_z = []
@@ -249,62 +253,97 @@ def metrics(pred_positions, pred_weights, positions, weights, offset, scale,
 
     for ppos, pweight, pos, weight in zip(pred_positions, pred_weights,
                                           positions, weights):
-        ppos = ppos[pweight > zero]
+        ppos = ppos[pweight > 0]
 
-        pos = pos[weight > zero]
+        pos = pos[weight > 0]
 
         if len(pos) == 0 or len(ppos) == 0:
             rmse_xy = 0.
             rmse_z = 0.
             if len(pos) == 0 and len(ppos) > 0:
-                jaccard = 0
+                tp = 0
+                fp = len(ppos)
+                fn = 0
+                jaccard = 0.
             elif len(ppos) == 0 and len(pos) > 0:
-                jaccard = 0
+                fn = len(ppos)
+                tp = 0
+                fp = 0
+                jaccard = 0.
             else:
-                jaccard = 1
+                fp = fn = tp = 0
+                jaccard = 1.
         else:
-            cost_matrix = pairwise_distances(pos, ppos, metric='euclidean')
-            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+            pred_relative = False
+            if pred_relative:
+                cost_matrix = pairwise_distances(pos, ppos, metric='euclidean')
 
-            matched_cost = cost_matrix[row_ind, col_ind]
-            mask = matched_cost < threshold
-            tp = mask.sum()
-            fn = len(mask) - tp
-            non_matched_mask = np.ones(cost_matrix.shape[1], dtype=np.bool)
-            non_matched_mask[col_ind] = 0
-            non_matched_cost = cost_matrix[:, non_matched_mask]
-            fp = np.all(non_matched_cost > threshold, axis=0).sum()
-            jaccard = float(tp) / (fn + fp + tp)
+                repeat = max(1, int(np.ceil(len(ppos) / len(pos))))
+                cost_matrix = np.tile(cost_matrix, (repeat, 1))
+                row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
-            if dim == 2:
-                if tp > 0:
-                    rmse_xy = np.sqrt((matched_cost[mask] ** 2).mean())
+                matched_cost = cost_matrix[row_ind, col_ind]
+                mask = matched_cost < threshold
+                tp = mask.sum()
+                fp = len(mask) - tp
+                fn = len(pos) - len(np.unique(row_ind % len(pos)))
+
+                jaccard = float(tp) / (fn + fp + tp)
+
+                if dim == 2:
+                    rmse_xy = np.sqrt((matched_cost ** 2).mean())
                 else:
-                    rmse_xy = 0.
-                rmse_z = 0.
+                    cost_matrix_xy = pairwise_distances(pos[:, :2], ppos[:, :2],
+                                                        metric='euclidean')
+                    cost_matrix_xy = np.tile(cost_matrix_xy, (repeat, 1))
+                    matched_xy = cost_matrix_xy[row_ind, col_ind]
+
+                    cost_matrix_z = pairwise_distances(pos[:, 2:3], ppos[:, 2:3],
+                                                       metric='euclidean')
+                    cost_matrix_z = np.tile(cost_matrix_z, (repeat, 1))
+                    matched_z = cost_matrix_z[row_ind, col_ind]
+                    rmse_xy = np.sqrt((matched_xy ** 2).mean())
+                    rmse_z = np.sqrt((matched_z ** 2).mean())
             else:
-                cost_matrix_xy = pairwise_distances(pos[:, :2], ppos[:, :2],
-                                                    metric='euclidean')
-                cost_matrix_z = pairwise_distances(pos[:, 2:3], ppos[:, 2:3],
-                                                   metric='euclidean')
-                if tp > 0:
-                    rmse_xy = np.sqrt((cost_matrix_xy[row_ind, col_ind][mask]
-                                       ** 2).mean())
-                    rmse_z = np.sqrt((cost_matrix_z[row_ind, col_ind][mask]
-                                      ** 2).mean())
-                else:
-                    rmse_xy = 0.
-                    rmse_z = 0.
-        jaccards.append(jaccard)
-        if rmse_xy != 0:
-            rmses_xy.append(rmse_xy)
-        elif rmse_z != 0:
-            rmses_z.append(rmse_z)
+                cost_matrix = pairwise_distances(pos, ppos, metric='euclidean')
+                row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
-    if len(rmses_xy) == 0:
-        rmses_xy = [0.]
-    if len(rmses_z) == 0:
-        rmses_z = [0.]
+                matched_cost = cost_matrix[row_ind, col_ind]
+                mask = matched_cost < threshold
+                tp = mask.sum()
+                fn = len(mask) - tp
+                non_matched_mask = np.ones(cost_matrix.shape[1], dtype=np.bool)
+                non_matched_mask[col_ind] = 0
+                non_matched_cost = cost_matrix[:, non_matched_mask]
+                fp = np.all(non_matched_cost > threshold, axis=0).sum()
+                jaccard = float(tp) / (fn + fp + tp)
+
+                if dim == 2:
+                    if tp > 0:
+                        rmse_xy = np.sqrt((matched_cost[mask] ** 2).mean())
+                    else:
+                        rmse_xy = 0.
+                    rmse_z = 0.
+                else:
+                    cost_matrix_xy = pairwise_distances(pos[:, :2],
+                                                        ppos[:, :2],
+                                                        metric='euclidean')
+                    cost_matrix_z = pairwise_distances(pos[:, 2:3],
+                                                       ppos[:, 2:3],
+                                                       metric='euclidean')
+                    if tp > 0:
+                        rmse_xy = np.sqrt(
+                            (cost_matrix_xy[row_ind, col_ind][mask]
+                             ** 2).mean())
+                        rmse_z = np.sqrt((cost_matrix_z[row_ind, col_ind][mask]
+                                          ** 2).mean())
+                    else:
+                        rmse_xy = 0.
+                        rmse_z = 0.
+        jaccards.append(jaccard)
+        # print(tp, fn, fp)
+        rmses_xy.append(rmse_xy)
+        rmses_z.append(rmse_z)
 
     jaccard = torch.tensor(jaccards)
     rmse_xy = torch.tensor(rmses_xy)
@@ -367,6 +406,12 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
                                                             weights)
             if train:
                 loss.backward()
+
+            pred_positions, pred_weights = cluster_and_trim(pred_positions,
+                                                            pred_weights,
+                                                            0, 1. / 64,
+                                                            1e-2)
+
             if fold != 'train' or batch_idx == 0:
                 size = len(loader.dataset) if fold == 'train' else batch_size
                 jaccard, rmse_xy, rmse_z = metrics(
@@ -377,14 +422,13 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
                 records['rmse_z'] += rmse_z * size
 
             if batch_idx == 0:
-                for i in range(1):
-                    plot_pred_ground_truth(pred_positions[i],
-                                           pred_weights[i],
-                                           positions[i],
-                                           weights[i],
-                                           imgs[i],
-                                           join(output_dir,
-                                                f'img_{fold}_e_{epoch}_{i}.png'))
+                plot_pred_ground_truth(pred_positions[0],
+                                       pred_weights[0],
+                                       positions[0],
+                                       weights[0],
+                                       imgs[0],
+                                       join(output_dir,
+                                            f'img_{fold}_e_{epoch}.png'))
             records['loss'] += loss.item() * batch_size
             n_samples += batch_size
             if train:
@@ -393,7 +437,6 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir,
                     print(f'{fold} epoch: {epoch} '
                           f'[{batch_idx * batch_size}/{len(loader.dataset)} '
                           f'({100. * batch_idx / len(loader):.0f}%)]\t'
-                          f'mean weights: {pred_weights.sum() / batch_size:.3f}\t'
                           f'loss: {loss.item():.6f}')
     print(f"=================> {fold} epoch: {epoch}", flush=False)
     for name, record in records.items():
@@ -474,7 +517,7 @@ def main(test_source, train_size, n_jobs,
                                   sigma=sigma,
                                   epsilon=epsilon, rho=rho,
                                   reduction='mean')
-        epsilon_scheduler = EpsilonLR(loss_fn, step_size=1, gamma=epsilon_gamma)
+        epsilon_scheduler = EpsilonLR(loss_fn, step_size=1, gamma=epsilon_gamma, min_epsilon=5e-3)
     loss_model = ClampedModelLoss(model, loss_fn, zero=zero)
 
     if not test_only:
