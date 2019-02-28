@@ -13,7 +13,7 @@ from sacred.observers import FileStorageObserver
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import pairwise_distances
 from torch import nn
-from torch.optim import Adam
+from torch.optim import Adam, SGD
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 
@@ -101,15 +101,30 @@ def sinkhorn():
 
 
 @exp.named_config
-def right_hausdorff():
+def sinkhorn2():
     measure = 'sinkhorn'
-    sigma = [0.01, 0.02, 0.04, 0.12]
-    p = 1
-    q = 1
+    sigma = [1]
+    epsilon = 1e-2
     rho = 1
-    epsilon = 1
     epsilon_gamma = 1
+
+    batch_size = 512
+    train_size = int(1024 * 512)
+
+    lr = 1e-4
+    epoch = 100
+
+    architecture = 'resnet'
+    mass_norm = True
+
+
+@exp.named_config
+def right_hausdorff():
+    measure = 'right_hausdorff'
+    epsilon = 1e-1
+    epsilon_gamma = .5
     gamma = 1
+    rho = None
 
     batch_size = 512
     train_size = int(1024 * 128)
@@ -117,7 +132,7 @@ def right_hausdorff():
 
     lr = 1e-4
 
-    architecture = 'deep_loco'
+    architecture = 'resnet'
     mass_norm = True
     lifted = False
 
@@ -142,11 +157,11 @@ def mmd():
 
 @exp.named_config
 def single_batch():
-    device = 'cpu'
-    batch_size = 16
-    train_size = int(16)
-    eval_size = 16
-    test_size = 16
+    device = 0
+    batch_size = 4
+    train_size = int(4)
+    eval_size = 4
+    test_size = 4
     seed = 17
     repeat = True
     train_only = True
@@ -169,7 +184,6 @@ class ClampedModelLoss(nn.Module):
     def forward(self, imgs, positions, weights):
         pred_positions, pred_weights = self.model(imgs)
         weights = torch.clamp(weights, min=self.zero)
-        pred_weights = torch.clamp(pred_weights, min=self.zero)
         return self.loss_fn(pred_positions, pred_weights,
                             positions, weights), pred_positions, pred_weights
 
@@ -195,13 +209,13 @@ def plot_example(datasets, output_dir):
 @exp.capture
 def plot_pred_ground_truth(pred_positions, pred_weights,
                            positions, weights,
-                           img, filename):
+                           img, filename, zero):
     fig, axes = plt.subplots(1, 2, figsize=(5, 5))
     c, m, n = img.shape
     for ax, pos, w in zip(axes, (pred_positions, positions),
                           (pred_weights, weights)):
-        pos = pos[w > 0]
-        w = w[w > 0]
+        pos = pos[w > zero]
+        w = w[w > zero]
         ax.imshow(img[0])
         ax.scatter(pos[:, 0] * m, pos[:, 1] * n,
                    s=w * 10, color='red')
@@ -352,6 +366,15 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir, zero,
                 loss.backward()
 
             if fold != 'train' or batch_idx == 0:
+                # For plot
+                if batch_idx == 0:
+                    plot_pred_ground_truth(pred_positions[0].detach().cpu().numpy(),
+                                           pred_weights[0].detach().cpu().numpy(),
+                                           positions[0].detach().cpu().numpy(),
+                                           weights[0].detach().cpu().numpy(),
+                                           imgs[0].detach().cpu().numpy(), join(output_dir,
+                                                f'img_{fold}_e_{epoch}.png'))
+
                 pred_positions = pred_positions * scale
                 positions = positions * scale
                 pred_positions = pred_positions + offset
@@ -359,7 +382,7 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir, zero,
                 # Postprocess
                 pred_positions, pred_weights = cluster_and_trim(pred_positions,
                                                                 pred_weights,
-                                                                zero, 0,
+                                                                zero, 100,
                                                                 1e-1)
                 pred_positions = pred_positions.detach().cpu().numpy()
                 pred_weights = pred_weights.detach().cpu().numpy()
@@ -382,17 +405,6 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir, zero,
                     preds = np.concatenate([frames, pred_positions], axis=2)
                     preds = preds[pred_weights != 0]
                     all_preds.append(preds)
-
-                if batch_idx == 0:
-                    offset_ = offset.cpu().numpy()
-                    scale_ = scale.cpu().numpy()
-                    plot_pred_ground_truth((pred_positions[0] - offset_)
-                                           / scale_, pred_weights[0],
-                                           (positions[0] - offset_) / scale_,
-                                           weights[0],
-                                           imgs[0].detach().cpu(),
-                                           join(output_dir,
-                                                f'img_{fold}_e_{epoch}.png'))
 
             records['loss'] += loss.item() * batch_size
             n_samples += batch_size
@@ -491,7 +503,7 @@ def main(test_source, train_size, n_jobs,
                                   sigma=sigma, lifted=lifted,
                                   epsilon=epsilon, rho=rho,
                                   reduction='mean')
-        epsilon_scheduler = EpsilonLR(loss_fn, step_size=1,
+        epsilon_scheduler = EpsilonLR(loss_fn, step_size=10,
                                       gamma=epsilon_gamma, min_epsilon=1e-4)
     loss_model = ClampedModelLoss(model, loss_fn, zero=zero)
 

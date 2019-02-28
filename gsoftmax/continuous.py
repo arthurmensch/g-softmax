@@ -197,6 +197,8 @@ class CNNPos(nn.Module):
         weights = self.weight_fc(x) + offset
         weights = torch.clamp(weights, min=self.zero)
 
+        weights = torch.ones_like(weights) / x.shape[1] * 5
+
         # weights.register_hook(lambda g: g.clamp(min=-10, max=10))
 
         return position, weights
