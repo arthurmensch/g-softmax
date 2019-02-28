@@ -20,7 +20,7 @@ def sum_pow_mat(A, max_n=15):
 def cluster_and_trim(positions, weights, pre_weight_thresh, distance_threshold,
                      post_weight_thresh, n_steps=10):
     weights = weights.clone()
-    weights[weights < pre_weight_thresh] = 0.0
+    weights[weights <= pre_weight_thresh] = 0.0
 
     if distance_threshold == 0:
         return positions, weights
@@ -40,7 +40,7 @@ def cluster_and_trim(positions, weights, pre_weight_thresh, distance_threshold,
     C_means = (weighted_C.matmul(positions))
     C_means[C_weights != 0] /= C_weights[C_weights != 0].unsqueeze(-1)
 
-    C_weights[C_weights < post_weight_thresh] = 0.0
+    C_weights[C_weights <= post_weight_thresh] = 0.0
 
     proc_positions = torch.zeros_like(positions)
     proc_weights = torch.zeros_like(weights)

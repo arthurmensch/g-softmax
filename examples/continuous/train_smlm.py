@@ -62,10 +62,11 @@ def base():
     architecture = 'resnet'
     batch_norm = False
 
+    lifted = False
     batch_size = 512
     train_size = int(1024 * 1024)
     eval_size = 2048
-    test_size = 2048
+    test_size = None
 
     mass_norm = True
 
@@ -82,29 +83,43 @@ def base():
 @exp.named_config
 def sinkhorn():
     measure = 'sinkhorn'
-    sigma = [1]
-    epsilon = 1e-2
+    sigma = [0.01, 0.02, 0.04, 0.12]
+    epsilon = 1
+    p = 1
+    q = 1
+    rho = 1
     epsilon_gamma = 1
 
     batch_size = 512
+    train_size = int(1024 * 512)
 
     lr = 1e-4
     epoch = 100
 
     architecture = 'deep_loco'
-    batch_norm = False
     mass_norm = True
+
 
 @exp.named_config
 def right_hausdorff():
-    measure = 'right_hausdorff'
-    sigma = [1]
-    epsilon = 1e-1
-    mass_norm = True
-    lr = 1e-4
-    epsilon_gamma = .5
+    measure = 'sinkhorn'
+    sigma = [0.01, 0.02, 0.04, 0.12]
+    p = 1
+    q = 1
     rho = 1
+    epsilon = 1
+    epsilon_gamma = 1
+    gamma = 1
 
+    batch_size = 512
+    train_size = int(1024 * 128)
+    test_size = 512
+
+    lr = 1e-4
+
+    architecture = 'deep_loco'
+    mass_norm = True
+    lifted = False
 
 @exp.named_config
 def mmd():
@@ -128,13 +143,13 @@ def mmd():
 @exp.named_config
 def single_batch():
     device = 'cpu'
-    batch_size = 1
-    train_size = int(1)
-    eval_size = 1
-    test_size = 10
-    seed = 1000
+    batch_size = 16
+    train_size = int(16)
+    eval_size = 16
+    test_size = 16
+    seed = 17
     repeat = True
-    train_only = False
+    train_only = True
 
 
 @exp.named_config
@@ -183,7 +198,6 @@ def plot_pred_ground_truth(pred_positions, pred_weights,
                            img, filename):
     fig, axes = plt.subplots(1, 2, figsize=(5, 5))
     c, m, n = img.shape
-
     for ax, pos, w in zip(axes, (pred_positions, positions),
                           (pred_weights, weights)):
         pos = pos[w > 0]
@@ -306,7 +320,7 @@ def load_checkpoint(filename, model, optimizer=None, scheduler=None):
 
 
 @exp.capture
-def train_eval_loop(model_loss, loader, fold, epoch, output_dir, dimension,
+def train_eval_loop(model_loss, loader, fold, epoch, output_dir, zero,
                     device, log_interval, _run, optimizer=None,
                     ):
     records = dict(loss=0.)
@@ -345,7 +359,7 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir, dimension,
                 # Postprocess
                 pred_positions, pred_weights = cluster_and_trim(pred_positions,
                                                                 pred_weights,
-                                                                0, 100,
+                                                                zero, 0,
                                                                 1e-1)
                 pred_positions = pred_positions.detach().cpu().numpy()
                 pred_weights = pred_weights.detach().cpu().numpy()
@@ -361,8 +375,8 @@ def train_eval_loop(model_loss, loader, fold, epoch, output_dir, dimension,
                     records['rmse_z'] += rmse_z * size
 
                 if fold == 'test':
-                    frames = np.repeat(np.arange(n_samples,
-                                                 batch_size + n_samples,
+                    frames = np.repeat(np.arange(n_samples + 1,
+                                                 batch_size + n_samples + 1,
                                                  dtype=np.float32)[:, None, None],
                                        pred_positions.shape[1], axis=1)
                     preds = np.concatenate([frames, pred_positions], axis=2)
@@ -411,7 +425,7 @@ def main(test_source, train_size, n_jobs,
          eval_size, batch_size, n_epochs, checkpoint,
          test_only, dimension, test_size, architecture,
          measure, sigma, epsilon, rho, lr, zero, p, q, gamma,
-         epsilon_gamma,
+         epsilon_gamma, lifted,
          batch_norm, train_only, beads, repeat,
          modality, device, _seed, _run):
     output_dir = join(base_dir, str(_run._id), 'artifacts')
@@ -464,6 +478,7 @@ def main(test_source, train_size, n_jobs,
                                       max_iter=100,
                                       sigma=this_sigma,
                                       epsilon=epsilon, rho=rho,
+                                      lifted=lifted,
                                       reduction='mean')
                       for this_sigma in sigma)
         epsilon_scheduler = None
@@ -473,11 +488,11 @@ def main(test_source, train_size, n_jobs,
             sigma = sigma[0]
         loss_fn = MeasureDistance(measure=measure, p=p, q=q,
                                   max_iter=100,
-                                  sigma=sigma,
+                                  sigma=sigma, lifted=lifted,
                                   epsilon=epsilon, rho=rho,
                                   reduction='mean')
         epsilon_scheduler = EpsilonLR(loss_fn, step_size=1,
-                                      gamma=epsilon_gamma, min_epsilon=5e-3)
+                                      gamma=epsilon_gamma, min_epsilon=1e-4)
     loss_model = ClampedModelLoss(model, loss_fn, zero=zero)
 
     if not test_only:

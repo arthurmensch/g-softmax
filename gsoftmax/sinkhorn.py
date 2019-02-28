@@ -248,6 +248,7 @@ scaled_dot_prod = ScaledDotProd.apply
 class MeasureDistance(torch.nn.Module):
     def __init__(self, measure='sinkhorn',
                  p=2, q=2, sigma=1., epsilon=1., rho=None, max_iter=100,
+                 lifted=False,
                  tol=1e-6, mass_norm=False, reduction='mean'):
         super().__init__()
         self.p = p
@@ -261,7 +262,14 @@ class MeasureDistance(torch.nn.Module):
         self.reduction = reduction
         self.mass_norm = mass_norm
 
+        self.lifted = lifted
+
     def forward(self, x, a, y, b):
+        if self.lifted:
+            x = torch.cat([x, a[:, :, None]], dim=2)
+            y = torch.cat([y, b[:, :, None]], dim=2)
+            a = torch.ones_like(a) / a.shape[1]
+            b = torch.ones_like(b) / b.shape[1]
         if self.measure == 'sinkhorn':
             res = sinkhorn_divergence(x, a, y, b, self.p, self.q,
                                       self.sigma, self.epsilon, self.rho,
