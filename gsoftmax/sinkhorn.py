@@ -269,7 +269,10 @@ class MeasureDistance(torch.nn.Module):
             x = torch.cat([x, a[:, :, None]], dim=2)
             y = torch.cat([y, b[:, :, None]], dim=2)
             a = torch.ones_like(a) / a.shape[1]
-            b = torch.ones_like(b) / b.shape[1]
+            # Target
+            s = b.sum(dim=1)
+            mask = s != 0
+            b[mask] = b[mask] / s[mask][:, None]
         if self.measure == 'sinkhorn':
             res = sinkhorn_divergence(x, a, y, b, self.p, self.q,
                                       self.sigma, self.epsilon, self.rho,

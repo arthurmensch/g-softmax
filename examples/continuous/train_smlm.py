@@ -82,6 +82,7 @@ def base():
 
 @exp.named_config
 def sinkhorn():
+    """ 0.93 eval accuracy"""
     measure = 'sinkhorn'
     sigma = [0.01, 0.02, 0.04, 0.12]
     epsilon = 1
@@ -114,7 +115,7 @@ def sinkhorn2():
     lr = 1e-4
     epoch = 100
 
-    architecture = 'resnet'
+    architecture = 'deep_loco'
     mass_norm = True
 
 
@@ -135,6 +136,29 @@ def right_hausdorff():
     architecture = 'resnet'
     mass_norm = True
     lifted = False
+
+
+@exp.named_config
+def lifted():
+    measure = 'right_hausdorff'
+    epsilon = 1
+    epsilon_gamma = .5
+    gamma = 1
+    rho = None
+
+    batch_size = 512
+    train_size = int(1024 * 128)
+    test_size = 512
+
+    lr = 1e-4
+
+    seed = 98
+
+    architecture = 'deep_loco'
+    mass_norm = False
+    lifted = False
+    zero = 1e-16
+
 
 @exp.named_config
 def mmd():
