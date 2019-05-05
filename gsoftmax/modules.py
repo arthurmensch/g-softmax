@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 from torch.nn import Parameter
 
-from gsoftmax.lbfgs_scipy import LBFGS as LBFGSscipy
 from gsoftmax.lbfgs_ls import LBFGS
 
 

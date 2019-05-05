@@ -9,7 +9,7 @@ from torchvision.utils import save_image
 import torch
 
 from gsoftmax.euclidean import _BaseGSpaceImpl
-from vae import VAE
+from vae_train import VAE
 
 import numpy as np
 

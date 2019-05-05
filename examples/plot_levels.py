@@ -7,7 +7,7 @@ from matplotlib import rc
 from matplotlib.colors import ListedColormap
 from torch.nn import Parameter
 
-from gsoftmax.modules import Gspace1d, Gspace2d
+from gsoftmax.modules import Gspace1d
 
 rc('font', **{'family': 'sans-serif'})
 rc('text', usetex=True)
@@ -110,7 +110,7 @@ for j, c in enumerate([1, 10]):
                          color='red')
     axes[j].set_ylabel(r'$e^{f_2}$')
 
-    axes[j].annotate(f'$spurious_charge = {c}$', xy=(.6, .85), fontsize=6,
+    axes[j].annotate(f'$\gamma = {c}$', xy=(.6, .85), fontsize=6,
                      xycoords='axes fraction',
                      bbox=dict(boxstyle="round,pad=0.3", fc='0.9',
                                ec="black", ))
@@ -125,7 +125,7 @@ beta = np.array(alpha, copy=True)
 beta[0] = .5
 ent = alpha * np.log(beta)
 ent = ent + ent[::-1]
-axes[1].plot(alpha, - ent, color='C0', label=r'$spurious_charge = \infty$')
+axes[1].plot(alpha, - ent, color='C0', label=r'$\gamma = \infty$')
 xs = np.linspace(-3, 3, 50)
 axes[0].plot(xs, 1 / (1 + np.exp(-xs)), color='C0')
 
@@ -148,7 +148,7 @@ for i, c in enumerate([.1, 2]):
     alpha = torch.cat([alpha_0[:, None], 1 - alpha_0[:, None]], dim=1)
     v = gspace.entropy(alpha)
     v = v.numpy()
-    axes[1].plot(alpha_0.numpy(), -v, color=f'C{i + 1}', label=f'$spurious_charge = {c}$')
+    axes[1].plot(alpha_0.numpy(), -v, color=f'C{i + 1}', label=f'$\gamma = {c}$')
 
 axes[0].set_xlabel(r'$f_1 - f_2$')
 axes[0].set_ylabel(r'${\nabla \Omega^\star(f)}_1$')
@@ -160,7 +160,7 @@ axes[1].legend(frameon=True, fontsize=6, loc='lower right')
 
 axes[0].annotate(r'$C =$', xy=(0.7, .45), xycoords='axes fraction',
                  ha='center', )
-axes[0].annotate(r'$\begin{pmatrix}0 & spurious_charge \\ spurious_charge & 0\end{pmatrix}$',
+axes[0].annotate(r'$\begin{pmatrix}0 & \gamma \\ \gamma & 0\end{pmatrix}$',
                  xy=(0.7, .1), ha='center',
                  xycoords='axes fraction')
 

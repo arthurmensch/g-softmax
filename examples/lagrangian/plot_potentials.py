@@ -1,4 +1,4 @@
-from gsoftmax.sampling import draw_samples
+from gsoftmax.lagrangian.sampling import draw_samples
 import numpy as np
 import torch
 

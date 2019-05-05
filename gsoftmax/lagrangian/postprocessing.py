@@ -1,7 +1,6 @@
-import joblib
 import torch
 import numpy as np
-from gsoftmax.sinkhorn import pairwise_distance
+from gsoftmax.lagrangian.sinkhorn import pairwise_distance
 
 
 def pairwise_l2_dist(p):

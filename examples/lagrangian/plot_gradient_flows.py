@@ -2,10 +2,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.nn import Parameter
-from torch.optim import Adam, SGD
+from torch.optim import SGD
 
-from gsoftmax.sinkhorn import MeasureDistance
-from gsoftmax.sampling import draw_samples, display_samples
+from gsoftmax.lagrangian.sinkhorn import MeasureDistance
+from gsoftmax.lagrangian.sampling import draw_samples, display_samples
 
 n_points = 100
 lr = 1e-5

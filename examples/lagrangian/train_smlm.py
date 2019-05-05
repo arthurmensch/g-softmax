@@ -13,18 +13,18 @@ from sacred.observers import FileStorageObserver
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import pairwise_distances
 from torch import nn
-from torch.optim import Adam, SGD
+from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 
-from gsoftmax.continuous import CNNPos, Sum, EpsilonLR
-from gsoftmax.datasets import SyntheticSMLMDataset, SMLMDataset
-from gsoftmax.postprocessing import cluster_and_trim
-from gsoftmax.sinkhorn import MeasureDistance
+from gsoftmax.lagrangian.models import CNNPos, Sum, EpsilonLR
+from gsoftmax.lagrangian.datasets import SyntheticSMLMDataset, SMLMDataset
+from gsoftmax.lagrangian.postprocessing import cluster_and_trim
+from gsoftmax.lagrangian.sinkhorn import MeasureDistance
 
 SETTINGS.HOST_INFO.INCLUDE_GPU_INFO = False
 
-base_dir = expanduser('~/output/g-softmax/smlm')
+base_dir = expanduser('~/output/g-softmax/lagrangian')
 exp = Experiment('vae')
 exp.observers.append(FileStorageObserver.create(base_dir))
 
