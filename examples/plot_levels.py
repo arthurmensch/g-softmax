@@ -154,7 +154,7 @@ axes[0].set_xlabel(r'$f_1 - f_2$')
 axes[0].set_ylabel(r'${\nabla \Omega^\star(f)}_1$')
 
 axes[1].set_xlabel(r'$\alpha$')
-axes[1].set_ylabel(r'$\Omega([\alpha, 1-\alpha])$')
+axes[1].set_ylabel(r'$-\Omega([\alpha, 1-\alpha])$')
 
 axes[1].legend(frameon=True, fontsize=6, loc='lower right')
 
