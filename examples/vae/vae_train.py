@@ -5,10 +5,6 @@ import joblib
 import torch
 import torch.utils.data
 
-from sacred import SETTINGS
-
-SETTINGS.HOST_INFO.INCLUDE_GPU_INFO = False
-
 from sacred import Experiment
 from sacred.observers import FileStorageObserver
 from torch import nn, optim
@@ -48,7 +44,7 @@ class ToProb(object):
 def system():
     cuda = True
     device = 0
-    seed = 0
+    seed = 100
     source = 'quickdraw_ambulance_64'
     checkpoint = False
     log_interval = 10
@@ -62,8 +58,8 @@ def base():
     loss_type = 'geometric'
     latent_dim = 256
     model_type = 'conv'
-    max_iter = 5
-    sigma = 3.
+    max_iter = 10
+    sigma = 2.
     regularization = .01
     lr = 1e-3
     # adversarial specific
@@ -242,10 +238,8 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
                                               shuffle=True, **kwargs)
 
     gspace = Gspace2d(h, w, sigma=sigma, tol=1e-4, max_iter=max_iter,
-                      method='lbfgs',
-                      verbose=False)
-    model = VAE(h, w, latent_dim,
-                loss_type=loss_type, model_type=model_type,
+                      method='lbfgs', verbose=False)
+    model = VAE(h, w, latent_dim, loss_type=loss_type, model_type=model_type,
                 gspace=gspace, regularization=regularization,
                 prob_param=prob_param,
                 gradient_reversal=gradient_reversal)
@@ -284,7 +278,7 @@ def run(device, loss_type, source, cuda, batch_size, checkpoint,
               output_dir=output_dir)
         generate(model=model, epoch=epoch, device=device,
                  output_dir=output_dir)
-        if epoch % 50 == 0:
+        if epoch % 10 == 0:
             save_checkpoint(model=model, optimizer=optimizer,
                             reverse_optimizer=reverse_optimizer,
                             epoch=epoch,
