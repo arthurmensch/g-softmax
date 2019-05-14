@@ -56,10 +56,10 @@ def base():
     batch_size = 512
     epochs = 100
     loss_type = 'geometric'
-    latent_dim = 256
+    latent_dim = 32
     model_type = 'conv'
-    max_iter = 10
-    sigma = 2.
+    max_iter = 50
+    sigma = 3.
     regularization = .01
     lr = 1e-3
     # adversarial specific
