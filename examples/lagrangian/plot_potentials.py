@@ -2,7 +2,7 @@ from gsoftmax.lagrangian.sampling import draw_samples
 import numpy as np
 import torch
 
-from gsoftmax.sinkhorn_factored import MeasureDistance
+from gsoftmax.lagrangian.sinkhorn_refactored import MeasureDistance
 
 x, a = draw_samples("data/density_b.png", 200, random_state=0)
 x = torch.from_numpy(x).float()

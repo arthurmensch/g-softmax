@@ -66,6 +66,14 @@ def c_transform(potential, log_weight, kernel, epsilon, rho):
     return lse / scale
 
 
+def quadratic_grad(z, x, a, y, b, g, p, q, sigma, epsilon, rho):
+    ge = pointwise_eval_potential(z, y, b, g, p, q, sigma, epsilon, rho, )
+    f = pointwise_eval_potential(x, y, b, g, p, q, sigma, epsilon, rho, )
+    fe = pointwise_eval_potential(z, x, a, f, p, q, sigma, epsilon, rho, )
+    res = (fe + ge) / 2
+    return res
+
+
 def phi_transform(f, epsilon, rho):
     if rho is None:
         return f
@@ -105,6 +113,14 @@ def potentials(x, a, y, b, p, q, sigma, epsilon, rho, max_iter, tol):
         if gap < tol:
             break
     return f, g
+
+
+def pointwise_eval_potential(x, y, b, g, p, q, sigma, epsilon, rho,):
+    log_b = b.log()
+    kxy = pairwise_distance(x, y, p, q, sigma)
+    f = c_transform(g, log_b, kxy, epsilon, rho)
+    f = phi_transform(f, epsilon, rho)
+    return f
 
 
 def evaluate_potential(x, a, y, b, g, p, q, sigma, epsilon, rho,

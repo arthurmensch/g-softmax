@@ -72,9 +72,11 @@ def _strong_Wolfe(obj_func, x, t, d, f, g, gtd, c1=1e-4, c2=0.9, tolerance_chang
         min_step = t + 0.01 * (t - t_prev)
         max_step = t * 10
         tmp = t
-        t = _cubic_interpolate(t_prev, f_prev, gtd_prev, t, f_new, gtd_new,
-                               bounds=(min_step, max_step))
-
+        try:
+            t = _cubic_interpolate(t_prev, f_prev, gtd_prev, t, f_new, gtd_new,
+                                   bounds=(min_step, max_step))
+        except ZeroDivisionError:
+            t = t
         # next step
         t_prev = tmp
         f_prev = f_new
@@ -99,9 +101,11 @@ def _strong_Wolfe(obj_func, x, t, d, f, g, gtd, c1=1e-4, c2=0.9, tolerance_chang
     low_pos, high_pos = (0, 1) if bracket_f[0] <= bracket_f[-1] else (1, 0)
     while not done and ls_iter < max_ls:
         # compute new trial value
-        t = _cubic_interpolate(bracket[0], bracket_f[0], bracket_gtd[0],
-                               bracket[1], bracket_f[1], bracket_gtd[1])
-
+        try:
+            t = _cubic_interpolate(bracket[0], bracket_f[0], bracket_gtd[0],
+                                   bracket[1], bracket_f[1], bracket_gtd[1])
+        except ZeroDivisionError:
+            t = t
         # test what we are making sufficient progress
         eps = 0.1 * (max(bracket) - min(bracket))
         if min(max(bracket) - t, t - min(bracket)) < eps:
