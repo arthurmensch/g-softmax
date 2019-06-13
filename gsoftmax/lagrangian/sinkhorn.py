@@ -70,7 +70,7 @@ def quadratic_grad(z, x, a, y, b, g, p, q, sigma, epsilon, rho):
     ge = pointwise_eval_potential(z, y, b, g, p, q, sigma, epsilon, rho, )
     f = pointwise_eval_potential(x, y, b, g, p, q, sigma, epsilon, rho, )
     fe = pointwise_eval_potential(z, x, a, f, p, q, sigma, epsilon, rho, )
-    res = (fe + ge) / 2
+    res = (ge - fe) / 2
     return res
 
 

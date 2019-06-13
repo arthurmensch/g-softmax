@@ -20,7 +20,7 @@ def density(x):
     return a
 
 
-def plot(b, g, a, y, x, i):
+def plot(b, g, a, y, x, last_v, last_z, i):
     fig, axes = plt.subplots(1, 4, figsize=(8, 2), constrained_layout=True)
     values = quadratic_grad(y, x, a, y, b, g, 2, 2, sigma, 1, None)
     b = b.numpy()[0]
@@ -41,8 +41,10 @@ def plot(b, g, a, y, x, i):
     axes[3].plot(y, values, color='orange', linewidth=2)
     axes[3].annotate('Linear minimization\noracle ' + rf'$t = {i}$',
                      xy=(.5, 0.7), ha='center', xycoords='axes fraction')
+    print(last_z, last_v)
+    axes[3].scatter([last_z], [last_v], s=20, marker='o', zorder=100, color='orange')
     axes[2].set_ylim([0, 0.5])
-    axes[3].set_ylim([0, 5])
+    axes[3].set_ylim([-5, 5])
     axes[0].set_ylim([0, 5])
     axes[1].set_ylim([0, 0.05])
     axes[1].set_yticks([])
@@ -95,10 +97,12 @@ for i in range(100):
 
     optimizer = LBFGS([z], lr=1, line_search_fn='strong_Wolfe')
     optimizer.step(closure=value_grad)
+    last_v = value_grad().detach().item()
+    last_z = z.data[0, 0].item()
     x_l.append(z.data)
     a_l = [this_a * (1 - 2 / (i + 3)) for this_a in a_l]
     a_l.append(2 / (i + 3))
 
     if i % 10 == 0:
         print(i)
-        plot(b, g, a, y, x, i)
+        plot(b, g, a, y, x, last_v, last_z, i)
